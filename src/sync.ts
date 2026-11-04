@@ -2,6 +2,7 @@ import { type Entry, fetchJson, type Plan, planProvider } from "./catalog";
 import { isOwnedBy, mergeEntries, readDroidSettings, writeDroidSettings } from "./droid";
 import { getDroidTools } from "./droid-tools";
 import { checkProvider } from "./health";
+import { migrateToSelections } from "./migrate";
 import { allProviders, type Provider } from "./providers";
 import { readHealth, readKeys, readSettings, type Settings, tryExclusive, updateState, withLock, writeHealth } from "./store";
 
@@ -37,9 +38,6 @@ interface SyncOptions {
 
 const emptyResult = (problem: string, plans: Plan[] = []): SyncResult => ({ plans, added: [], removed: [], total: 0, changed: false, checked: 0, requests: 0, failing: [], outages: [], problem });
 
-// An empty result only replaces what's there if the user unticked something the provider really lists.
-const userEmptiedIt = (plan: Plan, settings: Settings) => plan.available.some(m => settings.hidden[plan.provider.id]?.includes(m.id));
-
 // Requests are spent even when an attempt is thrown away, so they're counted across attempts.
 interface Spent {
 	checked: number;
@@ -47,8 +45,9 @@ interface Spent {
 }
 
 // Returns null if the keys or settings changed along the way, so the work no longer applies.
-async function attemptSync(options: SyncOptions, spent: Spent, checksUsed: Map<string, number>): Promise<SyncResult | null> {
+async function attemptSync(options: SyncOptions, spent: Spent): Promise<SyncResult | null> {
 	const dryRun = options.dryRun ?? false;
+	migrateToSelections();
 	const settings = readSettings();
 	const runChecks = settings.healthCheck && !dryRun;
 	// Held until the results are in Droid, so another copy can't publish models that are still being checked.
@@ -74,10 +73,7 @@ async function attemptSync(options: SyncOptions, spent: Spent, checksUsed: Map<s
 			const tools = await getDroidTools();
 			for (const [i, plan] of plans.entries()) {
 				if (plan.keyRejected) continue;
-				// A restart continues the same sync, so it shares the same limit on checks.
-				const used = checksUsed.get(plan.provider.id) ?? 0;
-				const check = await checkProvider(plan, keys[plan.provider.id] as string, settings, tools, health, isCurrent, settings.newestPerProvider * 3 - used);
-				checksUsed.set(plan.provider.id, used + check.checked);
+				const check = await checkProvider(plan, keys[plan.provider.id] as string, settings, tools, health, isCurrent);
 				plans[i] = check.plan;
 				spent.checked += check.checked;
 				spent.requests += check.requests;
@@ -91,7 +87,9 @@ async function attemptSync(options: SyncOptions, spent: Spent, checksUsed: Map<s
 			writeHealth(health);
 		}
 
-		const updates = plans.filter(p => !p.keyRejected && !outages.includes(p.provider.label) && (p.entries.length > 0 || userEmptiedIt(p, settings)));
+		// What the user ticked decides what's in Droid. A ticked model missing from a list stays, so a rejected
+		// key or a provider outage can't remove anything, and an outage found by checks leaves that provider alone.
+		const updates = plans.filter(p => !outages.includes(p.provider.label));
 		try {
 			return withLock(() => {
 				if (!isCurrent()) return null;
@@ -131,9 +129,8 @@ let queue: Promise<unknown> = Promise.resolve();
 export function runSync(options: SyncOptions = {}): Promise<SyncResult> {
 	const run = queue.then(async () => {
 		const spent: Spent = { checked: 0, requests: 0 };
-		const checksUsed = new Map<string, number>();
 		for (let attempt = 0; attempt < MAX_SYNC_ATTEMPTS; attempt++) {
-			const result = await attemptSync(options, spent, checksUsed);
+			const result = await attemptSync(options, spent);
 			if (result) return result;
 		}
 		return { ...emptyResult("Your keys or settings kept changing, so Droid's models weren't updated. Try again."), ...spent };

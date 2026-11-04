@@ -15,19 +15,12 @@ export interface Provider {
 	// Omit both to use the protocol the provider or models.dev reports for each model.
 	droidProvider?: DroidProvider;
 	baseUrl?: string;
-	// Pay-per-use providers get the price cap from Settings.
-	payPerUse?: boolean;
-	maxOutputPrice?: number;
-	// Only these model ID prefixes are chosen automatically, for gateways that list everything.
-	labs?: string[];
 	// Model ID prefixes that connect through the local fixer, because the service behind them
 	// rejects parts of Droid's tool definitions. An empty string matches every model.
 	fixToolSchemas?: string[];
 	// Has run real requests with a real key.
 	tested?: boolean;
 }
-
-const MAJOR_LABS = ["z-ai", "deepseek", "minimax", "moonshotai", "qwen", "xiaomi", "mistralai", "openai", "google", "anthropic", "x-ai"];
 
 const chat = (id: string, label: string, envName: string, baseUrl: string, keyUrl: string, more: Partial<Provider> = {}): Provider => ({
 	id,
@@ -38,7 +31,6 @@ const chat = (id: string, label: string, envName: string, baseUrl: string, keyUr
 	listUrl: `${baseUrl}/models`,
 	droidProvider: "generic-chat-completion-api",
 	baseUrl,
-	payPerUse: true,
 	...more,
 });
 
@@ -56,7 +48,6 @@ export const PROVIDERS: Provider[] = [
 	},
 	chat("openrouter", "OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "https://openrouter.ai/keys", {
 		verifyUrl: "https://openrouter.ai/api/v1/key",
-		labs: MAJOR_LABS,
 		tested: true,
 	}),
 	{
@@ -80,16 +71,15 @@ export const PROVIDERS: Provider[] = [
 		modelsDevKey: "anthropic",
 		droidProvider: "anthropic",
 		baseUrl: "https://api.anthropic.com",
-		payPerUse: true,
-	},
+		},
 	chat("openai", "OpenAI (API key)", "OPENAI_API_KEY", "https://api.openai.com/v1", "https://platform.openai.com/api-keys", { droidProvider: "openai" }),
 	// Google's OpenAI-compatible model list uses different IDs, so this one relies on models.dev.
 	chat("google", "Google Gemini", "GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai", "https://aistudio.google.com/apikey", { listUrl: undefined, fixToolSchemas: [""] }),
 	chat("deepseek", "DeepSeek", "DEEPSEEK_API_KEY", "https://api.deepseek.com", "https://platform.deepseek.com/api_keys"),
 	chat("xai", "xAI", "XAI_API_KEY", "https://api.x.ai/v1", "https://console.x.ai/team/default/api-keys"),
 	chat("mistral", "Mistral", "MISTRAL_API_KEY", "https://api.mistral.ai/v1", "https://console.mistral.ai/api-keys"),
-	chat("moonshot", "Moonshot", "MOONSHOT_API_KEY", "https://api.moonshot.ai/v1", "https://platform.moonshot.ai/console/api-keys", { modelsDevKey: "moonshotai", maxOutputPrice: 5 }),
-	chat("kimi-code", "Kimi Code", "KIMI_API_KEY", "https://api.kimi.com/coding/v1", "https://www.kimi.com/code", { modelsDevKey: undefined, payPerUse: false }),
+	chat("moonshot", "Moonshot", "MOONSHOT_API_KEY", "https://api.moonshot.ai/v1", "https://platform.moonshot.ai/console/api-keys", { modelsDevKey: "moonshotai" }),
+	chat("kimi-code", "Kimi Code", "KIMI_API_KEY", "https://api.kimi.com/coding/v1", "https://www.kimi.com/code", { modelsDevKey: undefined }),
 	{
 		id: "minimax",
 		label: "MiniMax",
@@ -98,18 +88,16 @@ export const PROVIDERS: Provider[] = [
 		modelsDevKey: "minimax",
 		droidProvider: "anthropic",
 		baseUrl: "https://api.minimax.io/anthropic",
-		payPerUse: true,
-	},
-	chat("minimax-code", "MiniMax Token Plan", "MINIMAX_CODE_API_KEY", "https://api.minimax.io/v1", "https://platform.minimax.io", { modelsDevKey: "minimax-coding-plan", payPerUse: false }),
+		},
+	chat("minimax-code", "MiniMax Token Plan", "MINIMAX_CODE_API_KEY", "https://api.minimax.io/v1", "https://platform.minimax.io", { modelsDevKey: "minimax-coding-plan" }),
 	chat("alibaba-coding-plan", "Alibaba Coding Plan", "ALIBABA_CODING_PLAN_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1", "https://modelstudio.console.alibabacloud.com/", {
 		envNames: ["ALIBABA_CODING_PLAN_API_KEY", "DASHSCOPE_API_KEY"],
-		payPerUse: false,
 	}),
-	chat("alibaba-token-plan", "Alibaba Token Plan", "ALIBABA_TOKEN_PLAN_API_KEY", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "https://modelstudio.console.alibabacloud.com/", { payPerUse: false }),
+	chat("alibaba-token-plan", "Alibaba Token Plan", "ALIBABA_TOKEN_PLAN_API_KEY", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "https://modelstudio.console.alibabacloud.com/"),
 	chat("xiaomi", "Xiaomi MiMo", "XIAOMI_API_KEY", "https://api.xiaomimimo.com/v1", "https://platform.xiaomimimo.com"),
-	chat("xiaomi-token-plan-sgp", "Xiaomi Token Plan (Singapore)", "XIAOMI_TOKEN_PLAN_SGP_API_KEY", "https://token-plan-sgp.xiaomimimo.com/v1", "https://platform.xiaomimimo.com/console/plan-manage", { payPerUse: false }),
-	chat("xiaomi-token-plan-ams", "Xiaomi Token Plan (Europe)", "XIAOMI_TOKEN_PLAN_AMS_API_KEY", "https://token-plan-ams.xiaomimimo.com/v1", "https://platform.xiaomimimo.com/console/plan-manage", { payPerUse: false }),
-	chat("xiaomi-token-plan-cn", "Xiaomi Token Plan (China)", "XIAOMI_TOKEN_PLAN_CN_API_KEY", "https://token-plan-cn.xiaomimimo.com/v1", "https://platform.xiaomimimo.com/console/plan-manage", { payPerUse: false }),
+	chat("xiaomi-token-plan-sgp", "Xiaomi Token Plan (Singapore)", "XIAOMI_TOKEN_PLAN_SGP_API_KEY", "https://token-plan-sgp.xiaomimimo.com/v1", "https://platform.xiaomimimo.com/console/plan-manage"),
+	chat("xiaomi-token-plan-ams", "Xiaomi Token Plan (Europe)", "XIAOMI_TOKEN_PLAN_AMS_API_KEY", "https://token-plan-ams.xiaomimimo.com/v1", "https://platform.xiaomimimo.com/console/plan-manage"),
+	chat("xiaomi-token-plan-cn", "Xiaomi Token Plan (China)", "XIAOMI_TOKEN_PLAN_CN_API_KEY", "https://token-plan-cn.xiaomimimo.com/v1", "https://platform.xiaomimimo.com/console/plan-manage"),
 	chat("groq", "Groq", "GROQ_API_KEY", "https://api.groq.com/openai/v1", "https://console.groq.com/keys"),
 	chat("cerebras", "Cerebras", "CEREBRAS_API_KEY", "https://api.cerebras.ai/v1", "https://cloud.cerebras.ai/platform/"),
 	chat("together", "Together", "TOGETHER_API_KEY", "https://api.together.xyz/v1", "https://api.together.xyz/settings/api-keys", { modelsDevKey: "togetherai" }),
@@ -119,10 +107,10 @@ export const PROVIDERS: Provider[] = [
 	chat("novita", "Novita", "NOVITA_API_KEY", "https://api.novita.ai/openai/v1", "https://novita.ai/settings/key-management", { modelsDevKey: "novita-ai" }),
 	chat("venice", "Venice", "VENICE_API_KEY", "https://api.venice.ai/api/v1", "https://venice.ai/settings/api"),
 	chat("baseten", "Baseten", "BASETEN_API_KEY", "https://inference.baseten.co/v1", "https://app.baseten.co/settings/api_keys"),
-	chat("synthetic", "Synthetic", "SYNTHETIC_API_KEY", "https://api.synthetic.new/openai/v1", "https://dev.synthetic.new/docs/api/overview", { payPerUse: false }),
+	chat("synthetic", "Synthetic", "SYNTHETIC_API_KEY", "https://api.synthetic.new/openai/v1", "https://dev.synthetic.new/docs/api/overview"),
 	chat("siliconflow", "SiliconFlow", "SILICONFLOW_API_KEY", "https://api.siliconflow.com/v1", "https://cloud.siliconflow.com/account/ak"),
-	chat("zenmux", "ZenMux", "ZENMUX_API_KEY", "https://zenmux.ai/api/v1", "https://zenmux.ai/settings/keys", { labs: MAJOR_LABS }),
-	chat("kilo", "Kilo", "KILO_API_KEY", "https://api.kilo.ai/api/gateway", "https://app.kilo.ai", { labs: MAJOR_LABS }),
+	chat("zenmux", "ZenMux", "ZENMUX_API_KEY", "https://zenmux.ai/api/v1", "https://zenmux.ai/settings/keys"),
+	chat("kilo", "Kilo", "KILO_API_KEY", "https://api.kilo.ai/api/gateway", "https://app.kilo.ai"),
 ];
 
 const VALID_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;

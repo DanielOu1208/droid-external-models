@@ -1,7 +1,7 @@
 {
   "name": "droid-external-models",
-  "version": "0.6.2",
-  "description": "Use your own model providers in Factory Droid, with models that stay current.",
+  "version": "0.7.0",
+  "description": "Use your own model providers in Factory Droid. Add your API keys and tick the models you want.",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -36,7 +36,7 @@ export function isOwnedBy(entry: Entry, provider: Provider): boolean {
 	return isCurrentCommand || isOurs || isLegacyEntry(helper, entry, provider);
 }
 
-export function mergeEntries(existing: Entry[], updates: { provider: Provider; entries: Entry[] }[]): Entry[] {
-	const isReplaced = (e: Entry) => updates.some(({ provider }) => isOwnedBy(e, provider));
+export function mergeEntries(existing: Entry[], updates: { provider: Provider; entries: Entry[]; missing?: string[] }[]): Entry[] {
+	const isReplaced = (e: Entry) => updates.some(({ provider, missing }) => isOwnedBy(e, provider) && !missing?.includes(e.model));
 	return [...existing.filter(e => !isReplaced(e)), ...updates.flatMap(u => u.entries)];
 }

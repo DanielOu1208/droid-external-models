@@ -176,16 +176,14 @@ export function removeEntries(settings: Entry, chosen: Leftover[]): Entry {
 	return { ...next, customModels: kept.map((e, i) => ("index" in e ? { ...e, index: i } : e)) };
 }
 
-export function pinModels(chosen: Leftover[]) {
+export function selectModels(chosen: Leftover[]) {
 	updateSettings(settings => {
-		const pinned = { ...settings.pinned };
-		const hidden = { ...settings.hidden };
+		const selected = { ...settings.selected };
 		for (const { kind, provider, entry } of chosen) {
 			if (kind !== "sameProvider" || !provider) continue;
-			pinned[provider.id] = [...new Set([...(pinned[provider.id] ?? []), String(entry.model)])];
-			hidden[provider.id] = (hidden[provider.id] ?? []).filter(m => m !== entry.model);
+			selected[provider.id] = [...new Set([...(selected[provider.id] ?? []), String(entry.model)])];
 		}
-		return { ...settings, pinned, hidden };
+		return { ...settings, selected };
 	});
 }
 
@@ -204,7 +202,16 @@ export function finishCleanup(chosen: Leftover[], providers: Provider[], keys: R
 		const matching = fresh.filter(l => wanted.has(fingerprint(l)));
 		// The user saw any differences and ticked it anyway, so "similar" counts here.
 		const removable = matching.filter(l => l.kind === "duplicate" || l.kind === "similar" || (l.kind === "other" && l.removable));
-		const kept = matching.filter(l => !removable.includes(l)).map(l => String(l.entry.displayName));
+		const notMoved = matching.filter(l => !removable.includes(l));
+		// The provider doesn't list these, so ticking them was no use. The hand-made entry stays as it was.
+		updateSettings(current => {
+			const selected = { ...current.selected };
+			for (const { provider, entry } of notMoved) {
+				if (provider) selected[provider.id] = (selected[provider.id] ?? []).filter(m => m !== entry.model);
+			}
+			return { ...current, selected };
+		});
+		const kept = notMoved.map(l => String(l.entry.displayName));
 		if (removable.length === 0) return { removed: [], kept };
 		const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
 		const backup = `${droidSettingsPath()}.before-cleanup-${stamp}`;

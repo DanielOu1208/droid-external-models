@@ -93,36 +93,28 @@ export function removeKey(id: string) {
 
 export interface Settings {
 	modelsDevUrl: string;
-	newestPerProvider: number;
-	minContext: number;
 	maxOutputTokens: number;
-	// USD per million output tokens, for pay-per-use providers. Null means no cap.
-	maxOutputPrice: number | null;
 	// Null leaves reasoning off by default.
 	reasoningEffort: string | null;
 	// Off unless the user opts in, because each check is a small paid request.
 	healthCheck: boolean;
-	skip: string[];
-	// Per provider: models always included, and models never included.
-	pinned: Record<string, string[]>;
-	hidden: Record<string, string[]>;
+	// Per provider, the models the user ticked. Nothing else goes into Droid.
+	selected: Record<string, string[]>;
 	customProviders: Provider[];
 }
 
 export const DEFAULT_SETTINGS: Settings = {
 	modelsDevUrl: "https://models.dev/api.json",
-	newestPerProvider: 6,
-	minContext: 128000,
 	maxOutputTokens: 32000,
-	maxOutputPrice: 3,
 	reasoningEffort: "high",
 	healthCheck: false,
-	skip: [":free", ":batch", "stealth/", "-free", "-legal"],
-	pinned: {},
-	hidden: {},
+	selected: {},
 	customProviders: [],
 };
 
+// The file as it is, for upgrading settings from an older version.
+// biome-ignore lint: older versions had fields this version doesn't know.
+export const readRawSettings = (): any => (existsSync(settingsPath()) ? JSON.parse(readFileSync(settingsPath(), "utf8")) : null);
 export const readSettings = (): Settings => readJson(settingsPath(), DEFAULT_SETTINGS);
 export const writeSettings = (settings: Settings) => withLock(() => writePrivate(settingsPath(), settings));
 export const updateSettings = (change: (settings: Settings) => Settings) => withLock(() => writePrivate(settingsPath(), change(readSettings())));

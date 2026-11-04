@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { capabilityIndex, chooseModels, describeModel, isChatModel, type Model, normalizeModelName, planProvider, ruleMatches, toEntry, toggleModel, verifyKey } from "./catalog";
+import { capabilityIndex, chooseModels, describeModel, isChatModel, normalizeModelName, planProvider, toEntry, toggleModel, verifyKey } from "./catalog";
 import { findLeftovers, findStaleRefs, fingerprint, isPreTicked, modelRef, removeEntries } from "./cleanup";
 import { isOwnedBy, mergeEntries } from "./droid";
 import { findKeys } from "./importer";
@@ -11,7 +11,7 @@ import { helperCommand } from "./self";
 import { sameEndpoint } from "./urls";
 import { configDir, DEFAULT_SETTINGS, getKey, readKeys, removeKey, saveKey, type Settings } from "./store";
 
-const settings: Settings = { ...DEFAULT_SETTINGS, newestPerProvider: 2, skip: [":free", "stealth/"], maxOutputPrice: 3 };
+const settings: Settings = { ...DEFAULT_SETTINGS, selected: { router: ["known", "Acme/Seer-2", "Acme/Plain-1"] } };
 
 const generic: Provider = {
 	id: "router",
@@ -23,7 +23,6 @@ const generic: Provider = {
 
 const md = (extra = {}) => ({ name: "M", tool_call: true, limit: { context: 200000, output: 64000 }, cost: { output: 1 }, release_date: "2026-01-01", ...extra });
 const model = (id: string, extra = {}, provider = generic) => describeModel(id, undefined, md(extra), provider, undefined);
-const newestFirst = (models: Model[]) => [...models].sort((a, b) => b.released.localeCompare(a.released));
 
 let dir: string;
 const savedEnv = { HOME: process.env.HOME, XDG: process.env.XDG_CONFIG_HOME };
@@ -70,40 +69,58 @@ describe("describeModel", () => {
 });
 
 describe("choosing models", () => {
-	const ids = (models: Model[], provider = generic) => ruleMatches(models, provider, settings).map(m => m.id);
+	const available = [model("a"), model("b"), model("c")];
+	const chosen = (s: Settings) => chooseModels(available, generic, s).map(m => m.id);
+	const none: Settings = { ...DEFAULT_SETTINGS };
 
-	test("keeps only the configured number, in the order given", () => {
-		expect(ids(newestFirst([model("old", { release_date: "2025-01-01" }), model("new", { release_date: "2026-06-01" }), model("mid", { release_date: "2026-01-01" })]))).toEqual(["new", "mid"]);
+	test("nothing goes into Droid until the user ticks it", () => {
+		expect(chosen(none)).toEqual([]);
 	});
 
-	test("drops skipped, toolless and small models", () => {
-		expect(ids([model("a:free"), model("stealth/b"), model("d", { tool_call: false }), model("e", { limit: { context: 1000 } })])).toEqual([]);
+	test("only ticked models count, and ticking twice undoes it", () => {
+		const one = toggleModel(none, generic, "b");
+		expect(chosen(one)).toEqual(["b"]);
+		const two = toggleModel(one, generic, "c");
+		expect(chosen(two)).toEqual(["b", "c"]);
+		expect(chosen(toggleModel(two, generic, "b"))).toEqual(["c"]);
 	});
 
-	test("caps pay-per-use providers and rejects unknown prices", () => {
-		const paid = { ...generic, payPerUse: true };
-		expect(ids([model("cheap", { cost: { output: 2 } }), model("pricey", { cost: { output: 4 } }), model("unknown", { cost: undefined })], paid)).toEqual(["cheap"]);
-		expect(ids([model("pricey", { cost: { output: 4 } })])).toEqual(["pricey"]);
+	test("a new model appearing changes nothing", () => {
+		const ticked = toggleModel(none, generic, "a");
+		const withNew = [model("brand-new", { release_date: "2027-01-01" }), ...available];
+		expect(chooseModels(withNew, generic, ticked).map(m => m.id)).toEqual(["a"]);
 	});
 
-	test("a provider's own cap beats the setting", () => {
-		expect(ids([model("mid", { cost: { output: 4 } })], { ...generic, payPerUse: true, maxOutputPrice: 5 })).toEqual(["mid"]);
+	test("one provider's ticks don't touch another's", () => {
+		const other = { ...generic, id: "other" };
+		const ticked = toggleModel(none, generic, "a");
+		expect(chooseModels(available, other, ticked)).toEqual([]);
+	});
+});
+
+describe("what's offered", () => {
+	const listing = (data: unknown[]) => Bun.serve({ port: 0, fetch: () => Response.json({ data }) });
+
+	test("models that can't work in Droid aren't listed, and everything else is", async () => {
+		const server = listing([{ id: "normal" }, { id: "free-one:free" }, { id: "stealth/secret" }, { id: "x:batch" }, { id: "no-tools", supported_parameters: ["temperature"] }, { id: "gpt-image-9" }]);
+		try {
+			const plan = await planProvider({ ...generic, listUrl: `http://localhost:${server.port}/` }, "k", DEFAULT_SETTINGS, {});
+			expect(plan.available.map(m => m.id).sort()).toEqual(["free-one:free", "normal", "stealth/secret"]);
+			expect(plan.entries).toEqual([]);
+		} finally {
+			server.stop(true);
+		}
 	});
 
-	test("applies the lab allowlist", () => {
-		expect(ids([model("good/a"), model("other/b")], { ...generic, labs: ["good"] })).toEqual(["good/a"]);
-	});
-
-	test("the user's picks override the rules, and toggling twice restores them", () => {
-		const available = [model("a"), model("b"), model("c")];
-		const selectedIds = (s: Settings) => chooseModels(available, generic, s).map(m => m.id);
-		expect(selectedIds(settings)).toEqual(["a", "b"]);
-		const pinned = toggleModel(settings, generic, "c", available);
-		expect(selectedIds(pinned)).toEqual(["a", "b", "c"]);
-		const hidden = toggleModel(pinned, generic, "a", available);
-		expect(selectedIds(hidden)).toEqual(["b", "c"]);
-		const restored = toggleModel(toggleModel(hidden, generic, "a", available), generic, "c", available);
-		expect(selectedIds(restored)).toEqual(["a", "b"]);
+	test("a ticked model the provider stops listing is reported, not dropped", async () => {
+		const server = listing([{ id: "still-here" }]);
+		try {
+			const plan = await planProvider({ ...generic, listUrl: `http://localhost:${server.port}/` }, "k", { ...DEFAULT_SETTINGS, selected: { router: ["still-here", "retired"] } }, {});
+			expect(plan.selected.map(m => m.id)).toEqual(["still-here"]);
+			expect(plan.missing).toEqual(["retired"]);
+		} finally {
+			server.stop(true);
+		}
 	});
 });
 
@@ -367,6 +384,10 @@ describe("merging into Droid's settings", () => {
 
 	test("replaces this app's entries, including ones from older versions", () => {
 		expect(mergeEntries([handMade, mine, legacy, lookalike], [{ provider: generic, entries: [fresh] }])).toEqual([handMade, lookalike, fresh]);
+	});
+
+	test("a ticked model the provider stopped listing keeps its entry", () => {
+		expect(mergeEntries([mine], [{ provider: generic, entries: [fresh], missing: ["old"] }])).toEqual([mine, fresh]);
 	});
 
 	test("leaves everything alone when a provider isn't updated", () => {

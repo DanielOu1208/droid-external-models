@@ -3,6 +3,7 @@ import pkg from "../package.json";
 import { findLeftovers } from "./cleanup";
 import { readDroidSettings } from "./droid";
 import { FIXER_PORT, serveFixer, startFixerAndGetToken } from "./fixer";
+import { migrateToSelections } from "./migrate";
 import { allProviders, checkCustomProviders } from "./providers";
 import { logPath, launchdScheduler } from "./schedule";
 import { getKey, readKeys, readSettings } from "./store";
@@ -25,7 +26,8 @@ async function sync(dryRun: boolean) {
 			console.log(`\n${plan.provider.label}: the provider rejected this key, so its models weren't changed.`);
 			continue;
 		}
-		console.log(`\n${plan.provider.label}: ${plan.selected.length} selected from ${plan.listed} (list from ${plan.listSource})`);
+		console.log(`\n${plan.provider.label}: ${plan.selected.length} ticked, from ${plan.listed} listed (list from ${plan.listSource})`);
+		if (plan.missing.length > 0) console.log(`  No longer listed, kept until you untick them: ${plan.missing.join(", ")}`);
 		for (const m of plan.selected) {
 			console.log(`  ${m.id.padEnd(44)} ${m.released.padEnd(11)} ${m.droidProvider}`);
 		}
@@ -44,6 +46,7 @@ async function sync(dryRun: boolean) {
 }
 
 function status() {
+	migrateToSelections();
 	const settings = readSettings();
 	console.log(`Health check: ${settings.healthCheck ? "on" : "off"}\n`);
 	const keys = readKeys();
@@ -87,6 +90,7 @@ async function main() {
 				console.log(USAGE);
 				return;
 			}
+			migrateToSelections();
 			const { startApp } = await import("./tui");
 			return startApp();
 		}

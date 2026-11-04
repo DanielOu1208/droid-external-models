@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPlan, describeModel, planProvider, type Model, type Plan } from "./catalog";
@@ -9,7 +9,7 @@ import { DEFAULT_SETTINGS, getKey, type HealthMap, readHealth, readSettings, rem
 import { runSync } from "./sync";
 
 type Handler = (req: Request, body: any) => Response | Promise<Response>;
-const settings: Settings = { ...DEFAULT_SETTINGS, newestPerProvider: 2, healthCheck: true };
+const settings: Settings = { ...DEFAULT_SETTINGS, healthCheck: true, selected: { host: ["a", "b", "c"] } };
 const tools = [{ type: "function", function: { name: "search", description: "d", parameters: { type: "object", properties: { limit: { type: "integer", exclusiveMinimum: 0 } } } } }];
 
 let server: ReturnType<typeof Bun.serve>;
@@ -130,7 +130,7 @@ describe("redirects during a check", () => {
 });
 
 describe("remembering that a host refuses images", () => {
-	const withImage = () => buildPlan({ provider: provider(), keyRejected: false, listed: 1, listSource: "provider API", available: [model("a", { image: true, advertisedImage: true })], selected: [], entries: [] }, settings);
+	const withImage = () => buildPlan({ provider: provider(), keyRejected: false, listed: 1, listSource: "provider API", available: [model("a", { image: true, advertisedImage: true })], selected: [], missing: [], entries: [] }, settings);
 	const old = () => new Date(Date.now() - 8 * 86_400_000).toISOString();
 	const refuseImages: Handler = (_req, body) => (JSON.stringify(body).includes("image_url") ? fail(400) : ok());
 
@@ -169,56 +169,63 @@ describe("when checks are due", () => {
 });
 
 describe("checking a provider", () => {
-	const basePlan = (ids: string[]): Plan => buildPlan({ provider: provider(), keyRejected: false, listed: ids.length, listSource: "provider API", available: ids.map(id => model(id)), selected: [], entries: [] }, settings);
+	const ticked = (ids: string[]): Settings => ({ ...settings, selected: { host: ids } });
+	const basePlan = (ids: string[], tick = ids): Plan => buildPlan({ provider: provider(), keyRejected: false, listed: ids.length, listSource: "provider API", available: ids.map(id => model(id)), selected: [], missing: [], entries: [] }, ticked(tick));
 	const failOnly = (...ids: string[]): Handler => (_req, body) => (ids.includes(body.model) ? fail(400, `${body.model} is gone`) : ok());
 
-	test("a failing model is replaced by the next newest that works", async () => {
+	test("only ticked models are checked", async () => {
+		await checkProvider(basePlan(["a", "b", "c"], ["b"]), "k", ticked(["b"]), tools, {});
+		expect(calls.map(c => c.body.model)).toEqual(["b"]);
+	});
+
+	test("a failing model stays out, and nothing is added in its place", async () => {
 		handler = failOnly("a");
 		const health: HealthMap = {};
-		const result = await checkProvider(basePlan(["a", "b", "c", "d"]), "k", settings, tools, health);
-		expect(result.plan.selected.map(m => m.id)).toEqual(["b", "c"]);
+		const result = await checkProvider(basePlan(["a", "b", "c", "d"], ["a", "b"]), "k", ticked(["a", "b"]), tools, health);
+		expect(result.plan.selected.map(m => m.id)).toEqual(["b"]);
 		expect(result.failed).toEqual([{ model: "a", reason: "a is gone" }]);
 		expect(result.outage).toBe(false);
 		expect(health.host?.a?.status).toBe("failed");
-		expect(health.host?.b?.status).toBe("ok");
-		expect(calls.map(c => c.body.model).sort()).toEqual(["a", "b", "c"]);
+		expect(calls.map(c => c.body.model).sort()).toEqual(["a", "b"]);
 	});
 
 	test("recent results aren't paid for twice", async () => {
 		const health: HealthMap = {};
-		await checkProvider(basePlan(["a", "b"]), "k", settings, tools, health);
+		await checkProvider(basePlan(["a", "b"]), "k", ticked(["a", "b"]), tools, health);
 		const before = calls.length;
-		await checkProvider(basePlan(["a", "b"]), "k", settings, tools, health);
+		await checkProvider(basePlan(["a", "b"]), "k", ticked(["a", "b"]), tools, health);
 		expect(calls).toHaveLength(before);
 	});
 
 	test("a model that recovers comes back", async () => {
 		const health: HealthMap = { host: { a: { status: "failed", checkedAt: new Date(Date.now() - 4_000_000).toISOString(), reason: "was down" } } };
-		const result = await checkProvider(basePlan(["a", "b"]), "k", settings, tools, health);
+		const result = await checkProvider(basePlan(["a", "b"]), "k", ticked(["a", "b"]), tools, health);
 		expect(result.plan.selected.map(m => m.id)).toEqual(["a", "b"]);
 		expect(health.host?.a?.status).toBe("ok");
 	});
 
-	test("stops after a limit, so a broken provider can't run up a bill", async () => {
-		handler = failOnly(...Array.from({ length: 30 }, (_, i) => `m${i}`).filter(id => id !== "m29"));
-		const ids = Array.from({ length: 30 }, (_, i) => `m${i}`);
-		await checkProvider(basePlan(ids), "k", settings, tools, { host: { m29: { status: "ok", checkedAt: new Date().toISOString() } } });
-		expect(calls.length).toBeLessThanOrEqual(settings.newestPerProvider * 3);
-	});
-
-	test("if everything fails, it blames the provider and records nothing", async () => {
+	test("if several all fail, it blames the provider and records nothing", async () => {
 		handler = () => fail(400);
 		const health: HealthMap = {};
-		const result = await checkProvider(basePlan(["a", "b", "c"]), "k", settings, tools, health);
+		const result = await checkProvider(basePlan(["a", "b", "c"]), "k", ticked(["a", "b", "c"]), tools, health);
 		expect(result.outage).toBe(true);
 		expect(health).toEqual({});
-		expect(result.plan.selected.map(m => m.id)).toEqual(["a", "b"]);
+		expect(result.plan.selected.map(m => m.id)).toEqual(["a", "b", "c"]);
+	});
+
+	test("one ticked model failing is just that model", async () => {
+		handler = () => fail(400, "gone");
+		const health: HealthMap = {};
+		const result = await checkProvider(basePlan(["a"]), "k", ticked(["a"]), tools, health);
+		expect(result.outage).toBe(false);
+		expect(result.plan.selected).toEqual([]);
+		expect(health.host?.a?.status).toBe("failed");
 	});
 
 	test("an account problem changes nothing", async () => {
 		handler = () => fail(402, "Out of credit");
 		const health: HealthMap = {};
-		const result = await checkProvider(basePlan(["a", "b"]), "k", settings, tools, health);
+		const result = await checkProvider(basePlan(["a", "b"]), "k", ticked(["a", "b"]), tools, health);
 		expect(result.failed).toEqual([]);
 		expect(result.plan.selected.map(m => m.id)).toEqual(["a", "b"]);
 		expect(health.host).toEqual({});
@@ -226,7 +233,7 @@ describe("checking a provider", () => {
 
 	test("stops as soon as the user changes something", async () => {
 		let allowed = 1;
-		const result = await checkProvider(basePlan(["a", "b", "c"]), "k", { ...settings, newestPerProvider: 3 }, tools, {}, () => allowed-- > 0);
+		const result = await checkProvider(basePlan(["a", "b", "c"]), "k", ticked(["a", "b", "c"]), tools, {}, () => allowed-- > 0);
 		expect(result.aborted).toBe(true);
 		expect(calls.length).toBeLessThan(3);
 	});
@@ -234,15 +241,15 @@ describe("checking a provider", () => {
 	test("counts every request, not just every model", async () => {
 		let n = 0;
 		handler = () => (++n === 1 ? fail(503) : ok());
-		const result = await checkProvider(basePlan(["a"]), "k", settings, tools, {});
+		const result = await checkProvider(basePlan(["a"]), "k", ticked(["a"]), tools, {});
 		expect(result).toMatchObject({ checked: 1, requests: 2 });
 	});
 
 	test("a model that refuses images loses image support in Droid", async () => {
 		handler = (_req, body) => (JSON.stringify(body).includes("image_url") ? fail(400) : ok());
-		const plan = buildPlan({ provider: provider(), keyRejected: false, listed: 1, listSource: "provider API", available: [model("a", { image: true })], selected: [], entries: [] }, settings);
+		const plan = buildPlan({ provider: provider(), keyRejected: false, listed: 1, listSource: "provider API", available: [model("a", { image: true })], selected: [], missing: [], entries: [] }, ticked(["a"]));
 		expect(plan.entries[0]?.noImageSupport).toBe(false);
-		const result = await checkProvider(plan, "k", settings, tools, {});
+		const result = await checkProvider(plan, "k", ticked(["a"]), tools, {});
 		expect(result.plan.entries[0]?.noImageSupport).toBe(true);
 	});
 });
@@ -265,7 +272,7 @@ describe("syncing", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	const useMock = (healthCheck: boolean) => {
+	const useMock = (healthCheck: boolean, selected: string[] = ["a", "b"]) => {
 		const base = `http://localhost:${server.port}`;
 		handler = (req, body) => {
 			const path = new URL(req.url).pathname;
@@ -273,10 +280,17 @@ describe("syncing", () => {
 			if (path === "/models") return Response.json({ data: [{ id: "a" }, { id: "b" }, { id: "c" }] });
 			return body?.model === "a" ? fail(400, "gone") : ok();
 		};
-		writeSettings({ ...DEFAULT_SETTINGS, modelsDevUrl: `${base}/md`, newestPerProvider: 2, healthCheck });
+		writeSettings({ ...DEFAULT_SETTINGS, modelsDevUrl: `${base}/md`, healthCheck, selected: { host: selected } });
 		return [provider({ listUrl: `${base}/models`, baseUrl: base })];
 	};
 	const modelRequests = () => calls.filter(c => c.path === "/chat/completions");
+	const droidFile = () => join(dir, ".factory", "settings.json");
+	const seedDroid = (entries: unknown[]) => {
+		mkdirSync(join(dir, ".factory"), { recursive: true });
+		writeFileSync(droidFile(), JSON.stringify({ customModels: entries }));
+	};
+	const droidModels = () => (JSON.parse(readFileSync(droidFile(), "utf8")).customModels as { model: string }[]).map(e => e.model);
+	const owned = (model: string) => ({ model, displayName: `${model} [Host]`, apiKeyHelper: "/x/droid-models key host" });
 
 	test("with the check off, not one model request is sent", async () => {
 		const result = await runSync({ providers: useMock(false) });
@@ -286,36 +300,51 @@ describe("syncing", () => {
 		expect(result.added).toHaveLength(2);
 	});
 
-	test("a dry run sends none either, even with the check on", async () => {
-		await runSync({ dryRun: true, providers: useMock(true) });
-		expect(modelRequests()).toEqual([]);
+	test("Droid gets exactly what's ticked, and a newer listed model isn't added", async () => {
+		await runSync({ providers: useMock(false, ["b"]) });
+		expect(droidModels()).toEqual(["b"]);
 	});
 
-	const droidFile = () => join(dir, ".factory", "settings.json");
-	const seedDroid = (entries: unknown[]) => {
-		mkdirSync(join(dir, ".factory"), { recursive: true });
-		writeFileSync(droidFile(), JSON.stringify({ customModels: entries }));
-	};
-	const droidNames = () => (JSON.parse(readFileSync(droidFile(), "utf8")).customModels as { displayName: string }[]).map(e => e.displayName);
-
-	test("a failed list can't wipe a provider's models, even with an unrelated model hidden", async () => {
-		const providers = useMock(false);
-		const base = `http://localhost:${server.port}`;
-		const noFallback = providers.map(p => ({ ...p, modelsDevKey: undefined, listUrl: `${base}/down` }));
-		handler = (req, body) => (new URL(req.url).pathname === "/down" ? fail(503) : new URL(req.url).pathname === "/md" ? Response.json({}) : ok());
-		writeSettings({ ...DEFAULT_SETTINGS, modelsDevUrl: `${base}/md`, hidden: { host: ["long-gone-model"] } });
-		seedDroid([{ model: "a", displayName: "A [Host]", apiKeyHelper: "/x/droid-models key host" }]);
-		await runSync({ providers: noFallback });
-		expect(droidNames()).toEqual(["A [Host]"]);
+	test("nothing ticked means nothing added", async () => {
+		await runSync({ providers: useMock(false, []) });
+		expect(existsSync(droidFile())).toBe(false);
 	});
 
-	test("unticking everything really does empty the list", async () => {
-		const providers = useMock(false);
-		const base = `http://localhost:${server.port}`;
-		writeSettings({ ...DEFAULT_SETTINGS, modelsDevUrl: `${base}/md`, newestPerProvider: 2, hidden: { host: ["a", "b"] } });
-		seedDroid([{ model: "a", displayName: "A [Host]", apiKeyHelper: "/x/droid-models key host" }, { model: "mine", displayName: "Mine" }]);
+	test("unticking removes a model, and hand-made entries stay", async () => {
+		const providers = useMock(false, ["b"]);
+		seedDroid([owned("a"), owned("b"), { model: "mine", displayName: "Mine" }]);
 		await runSync({ providers });
-		expect(droidNames()).toEqual(["Mine"]);
+		expect(droidModels().sort()).toEqual(["b", "mine"]);
+	});
+
+	test("a provider outage can't remove anything ticked", async () => {
+		const providers = useMock(false);
+		const base = `http://localhost:${server.port}`;
+		const down = providers.map(p => ({ ...p, modelsDevKey: undefined, listUrl: `${base}/down` }));
+		handler = (req) => (new URL(req.url).pathname === "/down" ? fail(503) : new URL(req.url).pathname === "/md" ? Response.json({}) : ok());
+		seedDroid([owned("a"), owned("b")]);
+		await runSync({ providers: down });
+		expect(droidModels()).toEqual(["a", "b"]);
+	});
+
+	test("a rejected key can't remove anything ticked", async () => {
+		const providers = useMock(false);
+		const inner = handler;
+		handler = (req, body) => (new URL(req.url).pathname === "/models" ? fail(401) : inner(req, body));
+		seedDroid([owned("a"), owned("b")]);
+		const result = await runSync({ providers });
+		expect(droidModels()).toEqual(["a", "b"]);
+		expect(result.plans[0]?.keyRejected).toBe(true);
+	});
+
+	test("a ticked model the provider retired stays until it's unticked", async () => {
+		const providers = useMock(false, ["b", "retired"]);
+		seedDroid([owned("retired"), owned("b")]);
+		await runSync({ providers });
+		expect(droidModels().sort()).toEqual(["b", "retired"]);
+		updateSettings(s => ({ ...s, selected: { host: ["b"] } }));
+		await runSync({ providers });
+		expect(droidModels()).toEqual(["b"]);
 	});
 
 	test("a key removed mid-sync doesn't bring its models back", async () => {
@@ -327,7 +356,7 @@ describe("syncing", () => {
 			return inner(req, body);
 		};
 		await runSync({ providers });
-		expect(droidNames()).toEqual([]);
+		expect(droidModels()).toEqual([]);
 	});
 
 	test("opting out mid-check stops further paid requests", async () => {
@@ -338,8 +367,6 @@ describe("syncing", () => {
 			if (new URL(req.url).pathname === "/chat/completions" && ++modelRequestsSeen === 1) updateSettings(s => ({ ...s, healthCheck: false }));
 			return inner(req, body);
 		};
-		// Checks run four at a time, so a batch already in the air can finish, but no new one starts.
-		writeSettings({ ...readSettings(), newestPerProvider: 2 });
 		await runSync({ providers });
 		expect(modelRequests().length).toBeLessThanOrEqual(2);
 	});
@@ -357,23 +384,6 @@ describe("syncing", () => {
 		await runSync({ providers: () => { const p = providers.map(x => ({ ...x, listUrl: seen.length === 0 ? `${base}/models` : `${base}/models?second=1` })); seen.push(p[0]?.listUrl); return p; } });
 		expect(seen).toHaveLength(2);
 		expect(calls.filter(c => c.path === "/models").length).toBe(2);
-	});
-
-	test("a restart can't go past the limit on checks", async () => {
-		const providers = useMock(true);
-		writeSettings({ ...readSettings(), newestPerProvider: 1 });
-		const base = `http://localhost:${server.port}`;
-		let seen = 0;
-		handler = (req, body) => {
-			const path = new URL(req.url).pathname;
-			if (path === "/md") return Response.json({});
-			if (path === "/models") return Response.json({ data: Array.from({ length: 12 }, (_, i) => ({ id: `m${i}` })) });
-			if (++seen === 3) updateSettings(s => ({ ...s, reasoningEffort: null }));
-			return fail(400, "gone");
-		};
-		expect(base).toContain("localhost");
-		await runSync({ providers });
-		expect(modelRequests().length).toBeLessThanOrEqual(3);
 	});
 
 	test("requests spent on a discarded attempt are still counted", async () => {
@@ -401,7 +411,7 @@ describe("syncing", () => {
 
 	test("another copy already checking means this one doesn't pay", async () => {
 		const providers = useMock(true);
-		seedDroid([{ model: "a", displayName: "A [Host]", apiKeyHelper: "/x/droid-models key host" }]);
+		seedDroid([owned("a")]);
 		const release = tryExclusive("health-check");
 		try {
 			const result = await runSync({ providers });
@@ -409,25 +419,68 @@ describe("syncing", () => {
 			expect(result.checked).toBe(0);
 			expect(result.problem).toContain("Another copy");
 			// Its unchecked models must not be published while the other copy is checking them.
-			expect(droidNames()).toEqual(["A [Host]"]);
+			expect(droidModels()).toEqual(["a"]);
 		} finally {
 			release?.();
 		}
 	});
 
+	test("a dry run sends no model requests and writes nothing, even with the check on", async () => {
+		await runSync({ dryRun: true, providers: useMock(true) });
+		expect(modelRequests()).toEqual([]);
+		expect(existsSync(droidFile())).toBe(false);
+	});
+
 	test("with the check on, failing models stay out of Droid and results are saved", async () => {
 		const result = await runSync({ providers: useMock(true) });
-		expect(result.checked).toBe(3);
+		expect(result.checked).toBe(2);
 		expect(result.failing).toEqual([{ provider: "Host", model: "a", reason: "gone" }]);
 		expect(readHealth().host?.a?.status).toBe("failed");
-		expect(result.total).toBe(2);
+		expect(droidModels()).toEqual(["b"]);
 		expect(getKey("host")).toBe("k");
+	});
+
+	describe("upgrading from a version that added models by itself", () => {
+		const writeOld = (raw: unknown) => writeFileSync(join(dir, ".config", "droid-models", "settings.json"), JSON.stringify(raw));
+		const providersFor = (ids: string[]) => {
+			const base = `http://localhost:${server.port}`;
+			handler = (req) => {
+				const path = new URL(req.url).pathname;
+				return path === "/md" ? Response.json({}) : path === "/models" ? Response.json({ data: ids.map(id => ({ id })) }) : ok();
+			};
+			return { base, providers: [provider({ listUrl: `${base}/models`, baseUrl: base })] };
+		};
+
+		test("nothing in Droid disappears, and a new listed model isn't added", async () => {
+			const { base, providers } = providersFor(["auto-1", "auto-2", "picked", "brand-new"]);
+			writeOld({ modelsDevUrl: `${base}/md`, newestPerProvider: 2, pinned: {}, hidden: {}, skip: [":free"], maxOutputPrice: 3, minContext: 128000, customProviders: [{ id: "host", label: "Host", envNames: ["X"], droidProvider: "generic-chat-completion-api", baseUrl: base }] });
+			seedDroid([owned("auto-1"), owned("auto-2")]);
+			await runSync({ providers });
+			expect(droidModels().sort()).toEqual(["auto-1", "auto-2"]);
+			expect(readSettings().selected.host?.sort()).toEqual(["auto-1", "auto-2"]);
+		});
+
+		test("old picks count, unticked ones stay unticked, and it only runs once", async () => {
+			const { base, providers } = providersFor(["a", "b", "c"]);
+			writeOld({ modelsDevUrl: `${base}/md`, pinned: { host: ["c"] }, hidden: { host: ["b"] }, customProviders: [{ id: "host", label: "Host", envNames: ["X"], droidProvider: "generic-chat-completion-api", baseUrl: base }] });
+			seedDroid([owned("a"), owned("b")]);
+			await runSync({ providers });
+			expect(readSettings().selected.host?.sort()).toEqual(["a", "c"]);
+			updateSettings(s => ({ ...s, selected: { host: [] } }));
+			await runSync({ providers });
+			expect(readSettings().selected.host).toEqual([]);
+			expect(droidModels()).toEqual([]);
+			const stored = JSON.parse(readFileSync(join(dir, ".config", "droid-models", "settings.json"), "utf8"));
+			expect(stored.pinned).toBeUndefined();
+			expect(stored.newestPerProvider).toBeUndefined();
+		});
 	});
 });
 
 test("planning ignores health results unless they're passed in", async () => {
 	handler = () => Response.json({ data: [{ id: "a" }, { id: "b" }] });
 	const p = provider({ listUrl: `http://localhost:${server.port}/models` });
-	expect((await planProvider(p, "k", settings, {})).selected.map(m => m.id)).toEqual(["a", "b"]);
-	expect((await planProvider(p, "k", settings, {}, { a: { status: "failed", checkedAt: "2026-01-01" } })).selected.map(m => m.id)).toEqual(["b"]);
+	const two = { ...settings, selected: { host: ["a", "b"] } };
+	expect((await planProvider(p, "k", two, {})).selected.map(m => m.id)).toEqual(["a", "b"]);
+	expect((await planProvider(p, "k", two, {}, { a: { status: "failed", checkedAt: "2026-01-01" } })).selected.map(m => m.id)).toEqual(["b"]);
 });

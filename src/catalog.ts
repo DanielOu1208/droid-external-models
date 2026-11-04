@@ -6,7 +6,7 @@ import { helperCommand } from "./self";
 import type { ModelHealth, Settings } from "./store";
 
 // Image, video, speech, embedding and similar models can't run a coding session.
-const NON_CHAT_NAMES = /embed|rerank|whisper|(^|[-_/.])tts($|[-_/.])|speech|transcri|dall-?e|(^|[-_/.])image($|[-_/.])|imagen|imagine|sora|(^|[-_/.])video($|[-_/.])|(^|[-_/.])veo|flux|stable-?diffusion|sdxl|moderation|safeguard|(^|[-_/.])ocr($|[-_/.])|(^|[-_/.])audio($|[-_/.])|music|realtime|-[itr]2v/i;
+const NON_CHAT_NAMES = /:batch|embed|rerank|whisper|(^|[-_/.])tts($|[-_/.])|speech|transcri|dall-?e|(^|[-_/.])image($|[-_/.])|imagen|imagine|sora|(^|[-_/.])video($|[-_/.])|(^|[-_/.])veo|flux|stable-?diffusion|sdxl|moderation|safeguard|(^|[-_/.])ocr($|[-_/.])|(^|[-_/.])audio($|[-_/.])|music|realtime|-[itr]2v/i;
 
 // A last resort for models no source describes, such as glm-5v-turbo or qwen-vl.
 const VISION_NAMES = /vision|(^|[-_/.])vl($|[-_/.])|\d(\.\d+)?v($|[-_])/i;
@@ -128,49 +128,15 @@ export function describeModel(id: string, live: Json, md: Json, provider: Provid
 
 export const isChatModel = (m: Model) => m.textOutput !== false && !NON_CHAT_NAMES.test(m.id);
 
-const priceCap = (provider: Provider, settings: Settings) =>
-	provider.maxOutputPrice ?? (provider.payPerUse ? (settings.maxOutputPrice ?? undefined) : undefined);
-
-// The newest models that pass the rules, before the user's own picks.
-export function ruleMatches(available: Model[], provider: Provider, settings: Settings): Model[] {
-	const cap = priceCap(provider, settings);
-	return available
-		.filter(m => {
-			if (settings.skip.some(pattern => m.id.includes(pattern))) return false;
-			if (m.tools === false) return false;
-			if (m.context !== undefined && m.context < settings.minContext) return false;
-			if (provider.labs && !provider.labs.includes(m.id.split("/")[0] ?? "")) return false;
-			// A capped provider needs a known price, so an unpriced model can't slip past the budget.
-			if (cap !== undefined && (m.outputPrice === undefined || m.outputPrice > cap)) return false;
-			return true;
-		})
-		.slice(0, settings.newestPerProvider);
-}
-
 export function chooseModels(available: Model[], provider: Provider, settings: Settings): Model[] {
-	const hidden = new Set(settings.hidden[provider.id] ?? []);
-	const pinned = new Set(settings.pinned[provider.id] ?? []);
-	const auto = ruleMatches(available, provider, settings).filter(m => !hidden.has(m.id));
-	return [...auto, ...available.filter(m => pinned.has(m.id) && !auto.includes(m))];
+	const selected = new Set(settings.selected[provider.id] ?? []);
+	return available.filter(m => selected.has(m.id));
 }
 
-export function toggleModel(settings: Settings, provider: Provider, modelId: string, available: Model[]): Settings {
-	const auto = new Set(ruleMatches(available, provider, settings).map(m => m.id));
-	const pinned = new Set(settings.pinned[provider.id] ?? []);
-	const hidden = new Set(settings.hidden[provider.id] ?? []);
-	const selected = pinned.has(modelId) || (auto.has(modelId) && !hidden.has(modelId));
-	if (selected) {
-		pinned.delete(modelId);
-		if (auto.has(modelId)) hidden.add(modelId);
-	} else {
-		hidden.delete(modelId);
-		if (!auto.has(modelId)) pinned.add(modelId);
-	}
-	return {
-		...settings,
-		pinned: { ...settings.pinned, [provider.id]: [...pinned] },
-		hidden: { ...settings.hidden, [provider.id]: [...hidden] },
-	};
+export function toggleModel(settings: Settings, provider: Provider, modelId: string): Settings {
+	const selected = new Set(settings.selected[provider.id] ?? []);
+	if (!selected.delete(modelId)) selected.add(modelId);
+	return { ...settings, selected: { ...settings.selected, [provider.id]: [...selected] } };
 }
 
 export function toEntry(m: Model, provider: Provider, settings: Settings): Entry {
@@ -243,6 +209,8 @@ export interface Plan {
 	listSource: "provider API" | "models.dev" | "nowhere";
 	available: Model[];
 	selected: Model[];
+	// Ticked, but not on the provider's list right now. These stay as they are until the user unticks them.
+	missing: string[];
 	entries: Entry[];
 }
 
@@ -254,7 +222,9 @@ export function buildPlan(plan: Plan, settings: Settings, health?: Record<string
 		return { ...m, advertisedImage: advertised, image: health?.[m.id]?.noImage ? false : advertised };
 	});
 	const selected = chooseModels(usableModels(available, health), plan.provider, settings);
-	return { ...plan, available, selected, entries: selected.map(m => toEntry(m, plan.provider, settings)) };
+	const listed = new Set(available.map(m => m.id));
+	const missing = (settings.selected[plan.provider.id] ?? []).filter(id => !listed.has(id));
+	return { ...plan, available, selected, missing, entries: selected.map(m => toEntry(m, plan.provider, settings)) };
 }
 
 export async function planProvider(provider: Provider, key: string | null, settings: Settings, modelsDev: Json, health?: Record<string, ModelHealth>): Promise<Plan> {
@@ -263,7 +233,7 @@ export async function planProvider(provider: Provider, key: string | null, setti
 	const response = provider.listUrl ? await request(provider.listUrl, key ?? undefined) : null;
 	// A dead key must not fall through to the models.dev list, or we'd add models that can't work.
 	if (key && isRejection(response)) {
-		return { provider, keyRejected: true, listed: 0, listSource: "nowhere", available: [], selected: [], entries: [] };
+		return { provider, keyRejected: true, listed: 0, listSource: "nowhere", available: [], selected: [], missing: settings.selected[provider.id] ?? [], entries: [] };
 	}
 	const live: Json[] | undefined = response?.ok ? await response.json().then(body => body?.data).catch(() => undefined) : undefined;
 	const useLive = Boolean(live?.length);
@@ -273,7 +243,8 @@ export async function planProvider(provider: Provider, key: string | null, setti
 		? (live as Json[]).map(row => describeModel(row.id, row, mdModels[row.id], provider, mdProvider, known(row.id)))
 		: Object.keys(mdModels).map(id => describeModel(id, undefined, mdModels[id], provider, mdProvider, known(id)));
 	const available = described
-		.filter(m => m.droidProvider && m.baseUrl && !m.deprecated && isChatModel(m))
+		// Droid can't work without tool calls, so those models aren't offered.
+		.filter(m => m.droidProvider && m.baseUrl && !m.deprecated && m.tools !== false && isChatModel(m))
 		.sort((a, b) => b.released.localeCompare(a.released) || a.id.localeCompare(b.id));
 	const plan: Plan = {
 		provider,
@@ -282,6 +253,7 @@ export async function planProvider(provider: Provider, key: string | null, setti
 		listSource: useLive ? "provider API" : described.length ? "models.dev" : "nowhere",
 		available,
 		selected: [],
+		missing: [],
 		entries: [],
 	};
 	return buildPlan(plan, settings, health);

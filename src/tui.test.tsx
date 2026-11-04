@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { render } from "ink-testing-library";
 import type { Provider } from "./providers";
 import type { Scheduler } from "./schedule";
-import { DEFAULT_SETTINGS, getKey, readHealth, readKeys, readSettings, readState, saveKey, writeSettings } from "./store";
+import { DEFAULT_SETTINGS, getKey, readHealth, readKeys, readSettings, readState, saveKey, updateSettings, writeHealth, writeSettings } from "./store";
 import { App } from "./tui";
 
 const GOOD_KEY = "sk-test-good-key-1234";
@@ -75,7 +75,7 @@ beforeEach(() => {
 	process.env.HOME = dir;
 	delete process.env.XDG_CONFIG_HOME;
 	modelRequests = [];
-	writeSettings({ ...DEFAULT_SETTINGS, modelsDevUrl: `http://localhost:${server.port}/models-dev`, newestPerProvider: 2, maxOutputPrice: 3 });
+	writeSettings({ ...DEFAULT_SETTINGS, modelsDevUrl: `http://localhost:${server.port}/models-dev` });
 });
 
 afterEach(() => {
@@ -122,6 +122,14 @@ async function addKey(ui: ReturnType<typeof startApp>, key: string) {
 	await ui.press(key, ENTER);
 }
 
+const tick = (...models: string[]) => updateSettings(s => ({ ...s, selected: { mock: models } }));
+
+// After adding a key the app waits on the provider screen, so setup carries on when you leave it.
+async function leaveProvider(ui: ReturnType<typeof startApp>) {
+	await ui.waitFor("Tick the models you want");
+	await ui.press(ESC);
+}
+
 async function passHealthOffer(ui: ReturnType<typeof startApp>) {
 	await ui.waitFor("Check that models really work?");
 	await ui.press("n");
@@ -139,23 +147,31 @@ describe("first run", () => {
 });
 
 describe("adding a key", () => {
-	test("checks it, saves it, and puts models in Droid", async () => {
+	test("checks it and saves it, and adds nothing until you tick something", async () => {
 		const ui = startApp();
 		await addKey(ui, GOOD_KEY);
-		await passHealthOffer(ui);
-		await ui.waitFor("Stay up to date?");
+		await ui.waitFor("Mock Cloud accepted your key");
+		await ui.waitFor("0 in Droid");
 		expect(getKey("mock")).toBe(GOOD_KEY);
+		expect(droidModels()).toEqual([]);
+		await ui.press(" ", DOWN, " ");
+		await ui.waitFor("2 in Droid");
+		await ui.press(ESC);
+		await ui.until(() => droidModels().length === 2, "the sync");
 		expect(droidModels().map((m: { model: string }) => m.model)).toEqual(["alpha", "beta"]);
 		for (const m of droidModels()) {
 			expect(m.apiKeyHelper).toEndWith(" key mock");
 			expect(JSON.stringify(m)).not.toContain(GOOD_KEY);
 		}
+		await passHealthOffer(ui);
+		await ui.waitFor("Stay up to date?");
 		ui.app.unmount();
 	});
 
 	test("never shows the key on screen", async () => {
 		const ui = startApp();
 		await addKey(ui, GOOD_KEY);
+		await leaveProvider(ui);
 		await passHealthOffer(ui);
 		await ui.waitFor("Stay up to date?");
 		await ui.press("n");
@@ -207,8 +223,10 @@ describe("daily sync offer", () => {
 	test("is asked once, after the first key, and honors the answer", async () => {
 		const ui = startApp();
 		await addKey(ui, GOOD_KEY);
+		await leaveProvider(ui);
 		await passHealthOffer(ui);
 		await ui.waitFor("Stay up to date?");
+		expect(ui.frame().replace(/\s+/g, " ")).toContain("never adds or removes models by itself");
 		await ui.press("y");
 		await ui.waitFor("Mock Cloud");
 		expect(ui.scheduler.calls).toEqual(["install"]);
@@ -217,8 +235,9 @@ describe("daily sync offer", () => {
 });
 
 describe("choosing models", () => {
-	test("space changes what Droid gets", async () => {
+	test("space changes what Droid gets, and only ticked models go in", async () => {
 		saveKey("mock", GOOD_KEY);
+		tick("alpha", "beta");
 		const ui = startApp();
 		await ui.waitFor("Mock Cloud");
 		await ui.press(ENTER);
@@ -230,8 +249,66 @@ describe("choosing models", () => {
 		await ui.press(ESC);
 		await ui.until(() => droidModels().length === 2, "the sync");
 		expect(droidModels().map((m: { model: string }) => m.model).sort()).toEqual(["beta", "gamma"]);
-		expect(readSettings().hidden.mock).toEqual(["alpha"]);
-		expect(readSettings().pinned.mock).toEqual(["gamma"]);
+		expect(readSettings().selected.mock?.sort()).toEqual(["beta", "gamma"]);
+		ui.app.unmount();
+	});
+
+	test("the newest are at the top, and ticked ones come first when you return", async () => {
+		saveKey("mock", GOOD_KEY);
+		tick("gamma");
+		const ui = startApp();
+		await ui.waitFor("Mock Cloud");
+		await ui.press(ENTER);
+		await ui.waitFor("1 in Droid");
+		const lines = ui.frame().split("\n").filter(line => /\[[x ]\]/.test(line)).map(line => line.match(/\[[x ]\]\s+(\w+)/)?.[1]);
+		expect(lines).toEqual(["gamma", "alpha", "beta"]);
+		ui.app.unmount();
+	});
+
+	test("search narrows the list, and space ticks what it finds", async () => {
+		saveKey("mock", GOOD_KEY);
+		const ui = startApp();
+		await ui.waitFor("Mock Cloud");
+		await ui.press(ENTER);
+		await ui.waitFor("0 in Droid");
+		await ui.press("/", "gam");
+		await ui.waitFor("Search: gam");
+		expect(ui.frame()).toContain("gamma");
+		expect(ui.frame()).not.toContain("alpha");
+		await ui.press(" ");
+		await ui.waitFor("1 in Droid");
+		expect(readSettings().selected.mock).toEqual(["gamma"]);
+		await ui.press(ESC);
+		await ui.until(() => ui.frame().includes("alpha"), "the full list to return");
+		expect(ui.frame()).toContain("Mock Cloud");
+		ui.app.unmount();
+	});
+
+	test("letters typed into search don't trigger commands", async () => {
+		saveKey("mock", GOOD_KEY);
+		const ui = startApp();
+		await ui.waitFor("Mock Cloud");
+		await ui.press(ENTER);
+		await ui.waitFor("0 in Droid");
+		await ui.press("/", "d", "a", "o", "j");
+		await ui.waitFor("Search: daoj");
+		expect(ui.frame()).toContain("No models match");
+		expect(ui.opened).toEqual([]);
+		expect(getKey("mock")).toBe(GOOD_KEY);
+		ui.app.unmount();
+	});
+
+	test("a ticked model the provider dropped is shown, and can be unticked", async () => {
+		saveKey("mock", GOOD_KEY);
+		tick("alpha", "retired-model");
+		const ui = startApp();
+		await ui.waitFor("Mock Cloud");
+		await ui.press(ENTER);
+		await ui.waitFor("retired-model");
+		await ui.press(DOWN);
+		await ui.waitFor("doesn't list this right now");
+		await ui.press(" ");
+		await ui.until(() => !(readSettings().selected.mock ?? []).includes("retired-model"), "the untick");
 		ui.app.unmount();
 	});
 });
@@ -242,14 +319,11 @@ describe("quick key presses", () => {
 		const ui = startApp();
 		await ui.waitFor("Mock Cloud");
 		await ui.press(ENTER);
-		await ui.waitFor("2 in Droid");
+		await ui.waitFor("0 in Droid");
 		// Several keys in one read, as a held arrow key delivers them.
 		await ui.press(DOWN + DOWN + " ");
-		await ui.waitFor("3 in Droid");
-		expect(readSettings().pinned.mock).toEqual(["gamma"]);
-		expect(readSettings().hidden.mock ?? []).toEqual([]);
-		await ui.press(" " + " ");
-		await ui.waitFor("3 in Droid");
+		await ui.waitFor("1 in Droid");
+		expect(readSettings().selected.mock).toEqual(["gamma"]);
 		ui.app.unmount();
 	});
 
@@ -258,10 +332,10 @@ describe("quick key presses", () => {
 		const ui = startApp();
 		await ui.waitFor("Mock Cloud");
 		await ui.press(ENTER);
-		await ui.waitFor("2 in Droid");
-		await ui.press(` ${DOWN} `);
 		await ui.waitFor("0 in Droid");
-		expect(readSettings().hidden.mock).toEqual(["alpha", "beta"]);
+		await ui.press(` ${DOWN} `);
+		await ui.waitFor("2 in Droid");
+		expect(readSettings().selected.mock).toEqual(["alpha", "beta"]);
 		ui.app.unmount();
 	});
 });
@@ -331,10 +405,10 @@ describe("setup with older models already in Droid", () => {
 		await ui.waitFor("Stay up to date?");
 		await ui.press("n");
 		await ui.waitFor("Removed 2 older models");
-		// Alpha was a duplicate. Gamma moved in. Mystery isn't offered, so it stayed. The others weren't ticked.
-		expect(names().sort()).toEqual(["ALPHA [Mock Cloud]", "BETA [Mock Cloud]", "GAMMA [Mock Cloud]", "Keep Me", "Old Mystery", "Other Beta"].sort());
+		// Alpha and Gamma moved in. Mystery isn't offered, so it stayed. The others weren't ticked.
+		expect(names().sort()).toEqual(["ALPHA [Mock Cloud]", "GAMMA [Mock Cloud]", "Keep Me", "Old Mystery", "Other Beta"].sort());
 		expect(ui.frame()).toContain("Old Mystery");
-		expect(readSettings().pinned.mock).toContain("gamma");
+		expect(readSettings().selected.mock?.sort()).toEqual(["alpha", "gamma"]);
 		const file = settingsFile();
 		expect(file.theme).toBe("dark");
 		expect(file.missionModelSettings.workerModel).toBe("custom:ALPHA-[Mock-Cloud]-0");
@@ -342,7 +416,7 @@ describe("setup with older models already in Droid", () => {
 		const backups = readdirSync(join(dir, ".factory")).filter(f => f.includes("before-cleanup"));
 		expect(backups).toHaveLength(1);
 		expect(statSync(join(dir, ".factory", backups[0] as string)).mode & 0o777).toBe(0o600);
-		expect(JSON.parse(readFileSync(join(dir, ".factory", backups[0] as string), "utf8")).customModels).toHaveLength(8);
+		expect(JSON.parse(readFileSync(join(dir, ".factory", backups[0] as string), "utf8")).customModels).toHaveLength(7);
 		for (const frame of ui.app.frames) expect(frame).not.toContain(GOOD_KEY);
 		ui.app.unmount();
 	});
@@ -385,6 +459,7 @@ describe("setup with older models already in Droid", () => {
 describe("a key that stops working", () => {
 	test("is flagged, and its models stay put", async () => {
 		saveKey("mock", "expired-key");
+		tick("alpha");
 		mkdirSync(join(dir, ".factory"), { recursive: true });
 		writeFileSync(join(dir, ".factory", "settings.json"), JSON.stringify({ customModels: [{ model: "alpha", displayName: "A [Mock Cloud]", apiKeyHelper: "/x/droid-models key mock" }] }));
 		const ui = startApp();
@@ -409,7 +484,7 @@ describe("importing", () => {
 		await passHealthOffer(ui);
 		await ui.waitFor("Stay up to date?");
 		expect(getKey("mock")).toBe(GOOD_KEY);
-		expect(droidModels()).toHaveLength(2);
+		expect(droidModels()).toEqual([]);
 		for (const frame of ui.app.frames) expect(frame).not.toContain(GOOD_KEY);
 		ui.app.unmount();
 	});
@@ -438,6 +513,10 @@ describe("the health check is opt-in", () => {
 	test("explains the cost, and answering no sends no model requests", async () => {
 		const ui = startApp();
 		await addKey(ui, GOOD_KEY);
+		await ui.waitFor("Tick the models you want");
+		await ui.press(" ");
+		await ui.waitFor("1 in Droid");
+		await ui.press(ESC);
 		await ui.waitFor("Check that models really work?");
 		const text = ui.frame().replace(/\s+/g, " ");
 		expect(text).toContain("costs a little on your provider bills");
@@ -455,18 +534,38 @@ describe("the health check is opt-in", () => {
 		ui.app.unmount();
 	});
 
-	test("answering yes checks models and keeps a failing one out of Droid", async () => {
+	test("answering yes checks ticked models and keeps a failing one out of Droid", async () => {
 		const ui = startApp();
 		await addKey(ui, GOOD_KEY);
+		await ui.waitFor("Tick the models you want");
+		await ui.press(" ", DOWN, " ");
+		await ui.waitFor("2 in Droid");
+		await ui.press(ESC);
 		await ui.waitFor("Check that models really work?");
 		await ui.press("y");
 		await ui.waitFor("Stay up to date?");
 		await ui.press("n");
-		await ui.until(() => droidModels().length > 0 && readHealth().mock !== undefined, "the first checked sync");
-		expect(readSettings().healthCheck).toBe(true);
-		expect(droidModels().map((m: { model: string }) => m.model)).toEqual(["beta", "gamma"]);
-		expect(readHealth().mock?.alpha?.status).toBe("failed");
+		await ui.until(() => readHealth().mock !== undefined, "the first checked sync");
 		await ui.waitFor("1 failing and kept out of Droid");
+		expect(readSettings().healthCheck).toBe(true);
+		expect(droidModels().map((m: { model: string }) => m.model)).toEqual(["beta"]);
+		expect(readHealth().mock?.alpha?.status).toBe("failed");
+		expect(requests().sort()).toEqual(["alpha", "beta"]);
+		ui.app.unmount();
+	});
+
+	test("a failing ticked model is flagged with the reason, and can be unticked", async () => {
+		saveKey("mock", GOOD_KEY);
+		updateSettings(s => ({ ...s, healthCheck: true, selected: { mock: ["alpha", "beta"] } }));
+		writeHealth({ mock: { alpha: { status: "failed", checkedAt: new Date().toISOString(), reason: "Model is retired" } } });
+		const ui = startApp();
+		await ui.waitFor("Mock Cloud");
+		await ui.press(ENTER);
+		await ui.waitFor("1 in Droid");
+		expect(ui.frame()).toContain("[!]");
+		await ui.waitFor("Kept out of Droid: Model is retired");
+		await ui.press(" ");
+		await ui.until(() => readSettings().selected.mock?.join() === "beta", "the untick");
 		ui.app.unmount();
 	});
 
@@ -475,7 +574,7 @@ describe("the health check is opt-in", () => {
 		await ui.waitFor("Mock Cloud");
 		await ui.press(",");
 		await ui.waitFor("Health check (small cost)");
-		await ui.press(DOWN, DOWN, DOWN, DOWN, DOWN, "\u001B[C");
+		await ui.press(DOWN, DOWN, "\u001B[C");
 		await ui.waitFor("costs a little on your provider bills");
 		await ui.press("n");
 		await ui.waitFor("Mock Cloud");
@@ -485,17 +584,20 @@ describe("the health check is opt-in", () => {
 });
 
 describe("settings", () => {
-	test("changing a rule updates Droid when you leave", async () => {
+	test("changing a setting updates Droid when you leave", async () => {
 		saveKey("mock", GOOD_KEY);
+		tick("alpha");
 		const ui = startApp();
 		await ui.waitFor("Mock Cloud");
 		await ui.press(",");
-		await ui.waitFor("Models per provider");
-		await ui.press("\u001B[C");
-		await ui.waitFor("‹ 3 ›");
+		await ui.waitFor("Default reasoning");
+		expect(ui.frame()).not.toContain("Models per provider");
+		expect(ui.frame()).not.toContain("Price cap");
+		await ui.press("\u001B[D");
+		await ui.waitFor("‹ medium ›");
 		await ui.press(ESC);
-		await ui.until(() => droidModels().length === 3, "the sync");
-		expect(readSettings().newestPerProvider).toBe(3);
+		await ui.until(() => droidModels().length === 1, "the sync");
+		expect(readSettings().reasoningEffort).toBe("medium");
 		ui.app.unmount();
 	});
 
@@ -504,7 +606,7 @@ describe("settings", () => {
 		await ui.waitFor("Mock Cloud");
 		await ui.press(",");
 		await ui.waitFor("Daily sync");
-		await ui.press(DOWN, DOWN, DOWN, DOWN, "\u001B[C");
+		await ui.press(DOWN, "\u001B[C");
 		await ui.waitFor("‹ on ›");
 		await ui.press("\u001B[C");
 		await ui.waitFor("‹ off ›");

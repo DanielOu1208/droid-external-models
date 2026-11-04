@@ -1,7 +1,7 @@
 import { Box, render, Text, useApp, useInput, usePaste, useWindowSize } from "ink";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { chooseModels, type Entry, type Model, type Plan, planProvider, toggleModel, usableModels, verifyKey } from "./catalog";
-import { findLeftovers, findStaleRefs, finishCleanup, fingerprint, isPreTicked, type Leftover, pinModels } from "./cleanup";
+import { type Entry, type Model, type Plan, planProvider, toggleModel, verifyKey } from "./catalog";
+import { findLeftovers, findStaleRefs, finishCleanup, fingerprint, isPreTicked, type Leftover, selectModels } from "./cleanup";
 import { droidSettingsPath, readDroidSettings } from "./droid";
 import { type FoundKey, findKeys, importFingerprint } from "./importer";
 import { allProviders, checkCustomProviders, PROVIDERS, type Provider } from "./providers";
@@ -204,7 +204,7 @@ function Home(props: { snapshot: Snapshot; found: number; notice: Notice | null;
 		<Screen title="droid-models" right={right} notice={props.notice} busy={props.busy} footer={`↑↓ move · enter open · / search · s sync${found > 0 ? " · i import" : ""}${canCleanUp ? " · c clean up" : ""} · , settings · q quit`}>
 			{connected === 0 ? (
 				<Box marginBottom={1}>
-					<Text>Pick a provider and press Enter to add your key. Its models then appear in Droid.</Text>
+					<Text>Pick a provider and press Enter to add your key, then tick the models you want in Droid.</Text>
 				</Box>
 			) : null}
 			{found > 0 ? (
@@ -232,12 +232,14 @@ function Home(props: { snapshot: Snapshot; found: number; notice: Notice | null;
 	);
 }
 
-function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice: Notice | null; busy: string | null; onBack: (changed: boolean) => void; onAddKey: () => void; onRemoveKey: () => void; onOpenUrl: (url: string) => void; onToggle: (modelId: string, available: Model[]) => void }) {
+function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice: Notice | null; busy: string | null; onBack: (changed: boolean) => void; onAddKey: () => void; onRemoveKey: () => void; onOpenUrl: (url: string) => void; onToggle: (modelId: string) => void }) {
 	const { provider, snapshot } = props;
 	const key = snapshot.keys[provider.id] ?? null;
 	const { rows, columns } = useWindowSize();
 	const [plan, setPlan] = useState<Plan | null>(null);
-	const [order, setOrder] = useState<Model[]>([]);
+	const [models, setModels] = useState<Model[]>([]);
+	const [search, setSearch] = useState<string | null>(null);
+	const order = useMemo(() => (search ? models.filter(m => m.id.toLowerCase().includes(search.toLowerCase())) : models), [models, search]);
 	const cursor = useListCursor(order.length);
 	const [confirming, setConfirming] = useState(false);
 	const changed = useRef(false);
@@ -250,7 +252,9 @@ function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice:
 			const loaded = await planProvider(provider, key, snapshot.settings, modelsDev);
 			if (!current) return;
 			setPlan(loaded);
-			setOrder([...loaded.selected, ...loaded.available.filter(m => !loaded.selected.includes(m))]);
+			const notListed: Model[] = loaded.missing.map(id => ({ id, name: id, released: "", deprecated: false }));
+			// Ticked models come first, then the rest with the newest at the top. The order holds while ticking.
+			setModels([...loaded.selected, ...notListed, ...loaded.available.filter(m => !loaded.selected.includes(m))]);
 		})();
 		return () => {
 			current = false;
@@ -259,7 +263,16 @@ function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice:
 
 	// Results only count for users who opted in to health checks.
 	const health = snapshot.settings.healthCheck ? snapshot.health[provider.id] : undefined;
-	const selectedIds = useMemo(() => new Set(plan ? chooseModels(usableModels(plan.available, health), provider, snapshot.settings).map(m => m.id) : []), [plan, health, provider, snapshot.settings]);
+	const ticked = useMemo(() => new Set(snapshot.settings.selected[provider.id] ?? []), [snapshot.settings, provider.id]);
+	const isFailing = (id: string) => ticked.has(id) && health?.[id]?.status === "failed";
+	const inDroid = [...ticked].filter(id => !isFailing(id)).length;
+
+	const tickCurrent = () => {
+		const model = order[cursor.current()];
+		if (!model) return;
+		changed.current = true;
+		props.onToggle(model.id);
+	};
 
 	useInput((input, inkKey) => {
 		if (confirming) {
@@ -267,27 +280,43 @@ function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice:
 			else setConfirming(false);
 			return;
 		}
+		if (inkKey.upArrow) return cursor.move(-1);
+		if (inkKey.downArrow) return cursor.move(1);
+		if (input === " ") return tickCurrent();
+		if (search !== null) {
+			if (inkKey.escape) {
+				cursor.reset();
+				return setSearch(null);
+			}
+			if (inkKey.backspace || inkKey.delete) return setSearch(current => (current ?? "").slice(0, -1));
+			if (input && !inkKey.ctrl && !inkKey.meta && !inkKey.return) {
+				cursor.reset();
+				setSearch(current => (current ?? "") + input);
+			}
+			return;
+		}
 		if (inkKey.escape) return props.onBack(changed.current);
-		if (inkKey.upArrow || input === "k") return cursor.move(-1);
-		if (inkKey.downArrow || input === "j") return cursor.move(1);
+		if (input === "k") return cursor.move(-1);
+		if (input === "j") return cursor.move(1);
+		if (input === "/") return setSearch("");
 		if (input === "a" || (inkKey.return && !key)) return props.onAddKey();
 		if (input === "d" && key) return setConfirming(true);
 		if (input === "o" && provider.keyUrl) return props.onOpenUrl(provider.keyUrl);
-		if (input === " " && plan) {
-			const model = order[cursor.current()];
-			if (!model || health?.[model.id]?.status === "failed") return;
-			changed.current = true;
-			props.onToggle(model.id, usableModels(plan.available, health));
-		}
 	});
 
 	const rejected = plan?.keyRejected || (key !== null && snapshot.state.rejected.includes(provider.id));
-	const activeHealth = health?.[order[cursor.position]?.id ?? ""];
-	const window = visibleWindow(order, cursor.position, Math.max(3, (rows || 24) - 12 - (activeHealth?.status === "failed" ? 1 : 0)));
+	const activeId = order[cursor.position]?.id ?? "";
+	const activeNote = isFailing(activeId) ? `Kept out of Droid: ${health?.[activeId]?.reason}. Checked again at the next sync.` : plan?.missing.includes(activeId) ? `${provider.label} doesn't list this right now. It stays until you untick it.` : null;
+	const reserved = 12 + (activeNote ? 1 : 0) + (search !== null ? 1 : 0);
+	const window = visibleWindow(order, cursor.position, Math.max(3, (rows || 24) - reserved));
 	// Leaves room for the health mark, so checked and unchecked rows line up.
 	const idWidth = Math.max(20, (columns || 80) - 36);
 	const keyLine = key ? `••••••••${key.slice(-4)}` : "none yet";
-	const footer = confirming ? "y remove · any other key cancels" : `↑↓ move · space pick · a ${key ? "replace" : "add"} key${key ? " · d remove key" : ""}${provider.keyUrl ? " · o open key page" : ""} · esc back`;
+	const footer = confirming
+		? "y remove · any other key cancels"
+		: search !== null
+			? "type to search · ↑↓ move · space tick · esc clear search"
+			: `↑↓ move · space tick · / search · a ${key ? "replace" : "add"} key${key ? " · d remove key" : ""}${provider.keyUrl ? " · o open key page" : ""} · esc back`;
 	return (
 		<Screen title={provider.label} right={provider.tested ? undefined : "untested with a real key"} notice={props.notice} busy={props.busy} footer={footer}>
 			<Text>
@@ -308,13 +337,14 @@ function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice:
 				{!plan ? <Text dimColor>Loading models…</Text> : null}
 				{plan && !plan.keyRejected ? (
 					<Text bold>
-						{key ? `${selectedIds.size} in Droid` : `${selectedIds.size} would be added`}
+						{key ? `${inDroid} in Droid` : `${ticked.size} ticked`}
 						<Text dimColor bold={false}>
-							{" "}of {order.length} available (list from {plan.listSource})
+							{" "}of {plan.available.length} available (list from {plan.listSource}). Only models you tick go into Droid.
 						</Text>
 					</Text>
 				) : null}
 				{plan?.listSource === "nowhere" && !plan.keyRejected ? <Text dimColor>Models will load after you add a key.</Text> : null}
+				{search !== null ? <Text>Search: {search}▏</Text> : null}
 				{window.items.length > 0 ? (
 					<Box>
 						<Box width={6} />
@@ -330,12 +360,13 @@ function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice:
 						<Text dimColor>released</Text>
 					</Box>
 				) : null}
+				{search && order.length === 0 ? <Text dimColor>No models match.</Text> : null}
 				{window.items.map((m, i) => {
 					const active = window.start + i === cursor.position;
 					return (
 						<Box key={m.id}>
 							<Text color={active ? "cyan" : undefined}>{active ? "› " : "  "}</Text>
-							{health?.[m.id]?.status === "failed" ? <Text color="red">[!] </Text> : <Text color={selectedIds.has(m.id) ? "green" : "gray"}>{selectedIds.has(m.id) ? "[x] " : "[ ] "}</Text>}
+							{isFailing(m.id) ? <Text color="red">[!] </Text> : <Text color={ticked.has(m.id) ? "green" : "gray"}>{ticked.has(m.id) ? "[x] " : "[ ] "}</Text>}
 							<Box width={idWidth}>
 								<Text bold={active} wrap="truncate">
 									{m.id}
@@ -348,12 +379,12 @@ function ProviderScreen(props: { provider: Provider; snapshot: Snapshot; notice:
 								<Text dimColor>{formatPrice(m.outputPrice)}</Text>
 							</Box>
 							<Text dimColor>{m.released}</Text>
-							{health?.[m.id]?.status === "ok" ? <Text color="green"> ✓</Text> : null}
+							{ticked.has(m.id) && health?.[m.id]?.status === "ok" ? <Text color="green"> ✓</Text> : null}
 						</Box>
 					);
 				})}
 				{window.hiddenAfter > 0 ? <Text dimColor>  ↓ {window.hiddenAfter} more</Text> : null}
-				{activeHealth?.status === "failed" ? <Text color="red">Kept out of Droid: {activeHealth.reason}. Checked again at the next sync.</Text> : null}
+				{activeNote ? <Text color={isFailing(activeId) ? "red" : "yellow"}>{activeNote}</Text> : null}
 			</Box>
 		</Screen>
 	);
@@ -516,9 +547,6 @@ function CleanupScreen(props: { leftovers: Leftover[]; staleRefs: { setting: str
 	);
 }
 
-const NEWEST_OPTIONS = [1, 2, 3, 4, 5, 6, 8, 10, 15, 20];
-const CAP_OPTIONS: (number | null)[] = [0.5, 1, 2, 3, 5, 10, 20, null];
-const CONTEXT_OPTIONS = [32000, 64000, 128000, 200000, 400000, 1000000];
 const EFFORT_OPTIONS: (string | null)[] = [null, "low", "medium", "high"];
 
 function SettingsScreen(props: { settings: Settings; scheduler: Scheduler; onDone: (settings: Settings, changed: boolean) => void; onToggleSchedule: () => string | null; onOfferHealth: (settings: Settings) => void }) {
@@ -531,9 +559,6 @@ function SettingsScreen(props: { settings: Settings; scheduler: Scheduler; onDon
 		return options[moveCursor(index < 0 ? 0 : index, delta, options.length)] as T;
 	};
 	const rows: { label: string; value: string; change: (delta: number) => void }[] = [
-		{ label: "Models per provider", value: `${settings.newestPerProvider}`, change: d => setSettings(s => ({ ...s, newestPerProvider: step(NEWEST_OPTIONS, s.newestPerProvider, d) })) },
-		{ label: "Price cap, pay-per-use providers", value: settings.maxOutputPrice === null ? "no cap" : `${settings.maxOutputPrice} USD per million output tokens`, change: d => setSettings(s => ({ ...s, maxOutputPrice: step(CAP_OPTIONS, s.maxOutputPrice, d) })) },
-		{ label: "Smallest context window", value: formatTokens(settings.minContext), change: d => setSettings(s => ({ ...s, minContext: step(CONTEXT_OPTIONS, s.minContext, d) })) },
 		{ label: "Default reasoning", value: settings.reasoningEffort ?? "off", change: d => setSettings(s => ({ ...s, reasoningEffort: step(EFFORT_OPTIONS, s.reasoningEffort, d) })) },
 	];
 	if (props.scheduler.supported) {
@@ -587,7 +612,7 @@ function OfferHealthCheck(props: { onAnswer: (yes: boolean) => void }) {
 	});
 	return (
 		<Screen title="Check that models really work?" footer="y turn on · n leave off">
-			<Text>Some providers list models that are down, or that can't work with Droid. With this on, droid-models sends each model a tiny real request and keeps failing ones out of Droid.</Text>
+			<Text>Some providers list models that are down, or that can't work with Droid. With this on, droid-models sends each model you tick a tiny real request and keeps failing ones out of Droid.</Text>
 			<Box marginTop={1}>
 				<Text color="yellow">This uses your API keys, so it costs a little on your provider bills: usually under 1 cent per model.</Text>
 			</Box>
@@ -605,7 +630,7 @@ function OfferSchedule(props: { onAnswer: (yes: boolean) => void }) {
 	});
 	return (
 		<Screen title="Stay up to date?" footer="y yes · n no">
-			<Text>New models can appear in Droid by themselves. droid-models would run a quick check at login and each morning.</Text>
+			<Text>droid-models can refresh your ticked models' limits and prices at login and each morning. It never adds or removes models by itself.</Text>
 			<Box marginTop={1}>
 				<Text dimColor>You can change this any time in Settings.</Text>
 			</Box>
@@ -619,6 +644,7 @@ export function App({ builtin = PROVIDERS, scheduler = launchdScheduler, openUrl
 	const [snapshot, setSnapshot] = useState(() => loadSnapshot(builtin));
 	const [busy, setBusy] = useState<string | null>(null);
 	const [notice, setNotice] = useState<Notice | null>(null);
+	const setupPending = useRef(false);
 	const [found, setFound] = useState<FoundKey[]>([]);
 	const storedProviders = Object.keys(snapshot.keys).join();
 
@@ -696,7 +722,7 @@ export function App({ builtin = PROVIDERS, scheduler = launchdScheduler, openUrl
 	const cleanUp = async (chosen: Leftover[]) => {
 		setView({ name: "home" });
 		setBusy("Cleaning up");
-		pinModels(chosen);
+		selectModels(chosen);
 		const providers = loadSnapshot(builtin).providers;
 		if (chosen.some(l => l.kind === "sameProvider")) await runSync({ providers: () => loadSnapshot(builtin).providers });
 		let message: Notice;
@@ -730,7 +756,7 @@ export function App({ builtin = PROVIDERS, scheduler = launchdScheduler, openUrl
 		const failed = rejected.map(c => c.f.provider.label);
 		const synced = await sync();
 		const failure = failed.length ? ` Not imported, because the provider rejected the key: ${failed.join(", ")}.` : "";
-		setNotice({ kind: failed.length ? "warn" : synced.kind, text: `Imported ${plural(usable.length, "key")}. ${synced.text}${failure}` });
+		setNotice(synced.kind === "bad" ? synced : { kind: failed.length ? "warn" : "good", text: `Imported ${plural(usable.length, "key")}. Open a provider to tick the models you want.${failure}` });
 		if (usable.length > 0) continueSetup();
 	};
 
@@ -756,15 +782,20 @@ export function App({ builtin = PROVIDERS, scheduler = launchdScheduler, openUrl
 					setNotice({ kind: "good", text: `Removed ${current.label}'s key and its models from Droid.` });
 					setView({ name: "home" });
 				}}
-				onToggle={(modelId, available) => {
+				onToggle={modelId => {
 					// Read fresh so quick toggles build on each other.
-					updateSettings(settings => toggleModel(settings, current, modelId, available));
+					updateSettings(settings => toggleModel(settings, current, modelId));
 					refresh();
 				}}
-				onBack={changed => {
+				onBack={async changed => {
 					setNotice(null);
 					setView({ name: "home" });
-					if (changed && snapshot.keys[current.id]) void sync().then(setNotice);
+					if (changed && snapshot.keys[current.id]) setNotice(await sync());
+					// Setup's remaining steps wait until the user has had the chance to tick models.
+					if (setupPending.current) {
+						setupPending.current = false;
+						continueSetup();
+					}
 				}}
 			/>
 		);
@@ -777,10 +808,10 @@ export function App({ builtin = PROVIDERS, scheduler = launchdScheduler, openUrl
 				onCancel={() => setView({ name: "provider", id: current.id })}
 				onSaved={async message => {
 					refresh();
+					setupPending.current = true;
 					setView({ name: "provider", id: current.id });
 					const synced = await sync();
-					setNotice(synced.kind === "bad" ? synced : { kind: message.kind, text: `${message.text} ${synced.text}` });
-					continueSetup();
+					setNotice(synced.kind === "bad" ? synced : { kind: message.kind, text: `${message.text} Tick the models you want with Space, then press Esc.` });
 				}}
 			/>
 		);

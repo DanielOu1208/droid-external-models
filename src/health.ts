@@ -139,54 +139,50 @@ export interface ProviderCheck {
 	checked: number;
 	requests: number;
 	failed: { model: string; reason: string }[];
-	// Everything failed, which points at the provider being down rather than at each model.
+	// Several models all failed, which points at the provider being down rather than at each model.
 	outage: boolean;
 	// The user changed a key or a setting, so the rest of the checks were dropped.
 	aborted: boolean;
 }
 
-export async function checkProvider(plan: Plan, key: string, settings: Settings, tools: Tool[], health: HealthMap, shouldContinue: () => boolean = () => true, limit = settings.newestPerProvider * 3): Promise<ProviderCheck> {
+export async function checkProvider(plan: Plan, key: string, settings: Settings, tools: Tool[], health: HealthMap, shouldContinue: () => boolean = () => true): Promise<ProviderCheck> {
 	const { provider } = plan;
 	const now = () => new Date().toISOString();
 	const saved = health[provider.id] ?? {};
 	const working: Record<string, ModelHealth> = { ...saved };
-	const tried = new Set<string>();
 	const failed: { model: string; reason: string }[] = [];
 	let passed = 0;
+	let checked = 0;
 	let requests = 0;
 	let aborted = false;
-	// Start from the picks as if nothing had failed, so failing models get their chance to recover.
-	let candidates = buildPlan(plan, settings, undefined).selected;
-	while (tried.size < limit) {
-		const due = candidates.filter(m => !tried.has(m.id) && isDue(working[m.id])).slice(0, limit - tried.size);
-		if (due.length === 0) break;
-		const results = await mapLimit(due, CONCURRENT_CHECKS, m => probeModel(provider, m, key, tools, shouldContinue));
-		due.forEach((m, i) => {
-			const result = results[i] as ProbeResult;
-			requests += result.requests;
-			if (result.outcome === "cancelled") {
-				aborted = true;
-				return;
-			}
-			tried.add(m.id);
-			if (result.outcome === "ok") {
-				passed++;
-				working[m.id] = { status: "ok", checkedAt: now(), ...(result.noImage ? { noImage: true } : {}) };
-			} else if (result.outcome === "failed") {
-				failed.push({ model: m.id, reason: result.reason });
-				working[m.id] = { status: "failed", checkedAt: now(), reason: result.reason };
-			}
-		});
-		if (aborted) {
-			health[provider.id] = working;
-			return { plan, checked: tried.size, requests, failed, outage: false, aborted: true };
+	// Everything ticked is a candidate, including failing models, so they get their chance to recover.
+	const candidates = buildPlan(plan, settings, undefined).selected;
+	const due = candidates.filter(m => isDue(working[m.id]));
+	const results = await mapLimit(due, CONCURRENT_CHECKS, m => probeModel(provider, m, key, tools, shouldContinue));
+	due.forEach((m, i) => {
+		const result = results[i] as ProbeResult;
+		requests += result.requests;
+		if (result.outcome === "cancelled") {
+			aborted = true;
+			return;
 		}
-		candidates = buildPlan(plan, settings, working).selected;
+		checked++;
+		if (result.outcome === "ok") {
+			passed++;
+			working[m.id] = { status: "ok", checkedAt: now(), ...(result.noImage ? { noImage: true } : {}) };
+		} else if (result.outcome === "failed") {
+			failed.push({ model: m.id, reason: result.reason });
+			working[m.id] = { status: "failed", checkedAt: now(), reason: result.reason };
+		}
+	});
+	if (aborted) {
+		health[provider.id] = working;
+		return { plan, checked, requests, failed, outage: false, aborted: true };
 	}
 	const anyWorking = candidates.some(m => working[m.id]?.status === "ok");
-	if (failed.length > 0 && passed === 0 && !anyWorking) {
-		return { plan: buildPlan(plan, settings, saved), checked: tried.size, requests, failed, outage: true, aborted: false };
+	if (failed.length >= 2 && passed === 0 && !anyWorking) {
+		return { plan: buildPlan(plan, settings, saved), checked, requests, failed, outage: true, aborted: false };
 	}
 	health[provider.id] = working;
-	return { plan: buildPlan(plan, settings, working), checked: tried.size, requests, failed, outage: false, aborted: false };
+	return { plan: buildPlan(plan, settings, working), checked, requests, failed, outage: false, aborted: false };
 }
