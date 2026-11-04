@@ -6,18 +6,17 @@ This is an independent project, not affiliated with or endorsed by Factory.
 
 ## Install
 
-Needs [Bun](https://bun.sh) to build. The result is one standalone file, so Bun isn't needed to run it.
-
 ```sh
-git clone https://github.com/DanielOu1208/droid-external-models.git
-cd droid-external-models
-bun install
-bun run install-local
+curl -fsSL https://raw.githubusercontent.com/DanielOu1208/droid-external-models/main/install.sh | sh
 ```
 
-This puts the `droid-models` command in `~/.local/bin`. If your shell can't find it, add that folder to your `PATH`. To update later, run `git pull` and `bun run install-local` again.
+This downloads the latest release, checks it against its published checksum, and puts the `droid-models` command in `~/.local/bin`. To update, run the same line again. You don't need Bun or Git.
 
-It's been run on macOS only so far.
+It runs on macOS and on Linux with glibc, on Intel or ARM. Windows isn't supported. Each release's tests pass and the app starts on all four, but day-to-day use with Droid has only been on macOS so far.
+
+The Mac builds aren't signed with an Apple Developer ID. The line above isn't affected, but if you download one from the Releases page in a browser, macOS may block it until you allow it in System Settings.
+
+To build it yourself, see [Development](#development).
 
 ## Run it
 
@@ -116,6 +115,8 @@ bun test
 bun run build          # standalone binary in dist/
 bun run install-local  # build and copy to ~/.local/bin
 ```
+
+A version tag such as `v0.8.0` builds, tests and starts the app on all four platforms, then publishes the release.
 
 ## License
 

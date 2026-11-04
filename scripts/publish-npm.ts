@@ -87,22 +87,27 @@ function stageMain() {
 
 const sha256 = async (path: string) => new Bun.CryptoHasher("sha256").update(await Bun.file(path).arrayBuffer()).digest("hex");
 
+const allFiles = (dir: string) => [...new Bun.Glob("**/*").scanSync({ cwd: dir, dot: true })].sort();
+
 // A rerun finishes a partly published release. Anything else under this name and version must not go out as a dependency.
-async function assertMatchesRelease(dir: string, name: string, program: string) {
+// Every file has to match, because a manifest can redirect the program or add install scripts as easily as a program can differ.
+async function assertMatchesRelease(dir: string, name: string) {
 	const download = mkdtempSync(join(stage, "published-"));
 	run(["npm", "pack", `${name}@${pkg.version}`, "--pack-destination", download, "--silent"]);
 	const archive = new Bun.Glob("*.tgz").scanSync(download).next().value;
 	run(["tar", "-xzf", join(download, archive), "-C", download]);
-	const published = await Bun.file(join(download, "package", "package.json")).json();
-	if (published.scripts?.preinstall || published.scripts?.install || published.scripts?.postinstall || (await sha256(join(download, "package", program))) !== (await sha256(join(dir, program)))) {
+	const published = join(download, "package");
+	const files = allFiles(dir);
+	const hashes = await Promise.all(files.map(async file => (await sha256(join(published, file)).catch(() => null)) === (await sha256(join(dir, file)))));
+	if (JSON.stringify(allFiles(published)) !== JSON.stringify(files) || hashes.includes(false)) {
 		throw new Error(`${name}@${pkg.version} is on npm but isn't this release, so nothing more was published. Check who owns that package.`);
 	}
 }
 
-async function publish(dir: string, name: string, program: string) {
+async function publish(dir: string, name: string) {
 	const existing = Bun.spawnSync(["npm", "view", `${name}@${pkg.version}`, "version"], { stdout: "pipe", stderr: "ignore" });
 	if (existing.stdout.toString().trim() === pkg.version) {
-		await assertMatchesRelease(dir, name, program);
+		await assertMatchesRelease(dir, name);
 		console.log(`${name}@${pkg.version} is already published.`);
 		return;
 	}
@@ -112,8 +117,8 @@ async function publish(dir: string, name: string, program: string) {
 
 try {
 	// The main package goes last, so it's never live without the packages it needs.
-	for (const platform of PLATFORMS) await publish(stagePlatform(platform), `${pkg.name}-${platform.id}`, "bin/droid-models");
-	await publish(stageMain(), pkg.name, "bin/droid-models.cjs");
+	for (const platform of PLATFORMS) await publish(stagePlatform(platform), `${pkg.name}-${platform.id}`);
+	await publish(stageMain(), pkg.name);
 } finally {
 	rmSync(stage, { recursive: true, force: true });
 }
