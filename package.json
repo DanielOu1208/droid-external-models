@@ -1,6 +1,6 @@
 {
   "name": "droid-external-models",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Use your own model providers in Factory Droid. Add your API keys and tick the models you want.",
   "license": "MIT",
   "repository": {
@@ -19,6 +19,7 @@
   "scripts": {
     "dev": "bun src/cli.ts",
     "test": "bun test",
+    "smoke": "bun scripts/smoke.ts dist/droid-models",
     "build": "bun build --compile src/cli.ts --outfile dist/droid-models; status=$?; rm -f .*.bun-build; exit $status",
     "install-local": "bun run build && mkdir -p ~/.local/bin && cp dist/droid-models ~/.local/bin/.droid-models.tmp && mv ~/.local/bin/.droid-models.tmp ~/.local/bin/droid-models"
   },

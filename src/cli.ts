@@ -6,10 +6,11 @@ import { FIXER_PORT, serveFixer, startFixerAndGetToken } from "./fixer";
 import { migrateToSelections } from "./migrate";
 import { allProviders, checkCustomProviders } from "./providers";
 import { logPath, launchdScheduler } from "./schedule";
+import { ensureStableCopy, stableCopyPath } from "./self";
 import { getKey, readKeys, readSettings } from "./store";
 import { runSync, summarizeDroid } from "./sync";
 
-const USAGE = `droid-models ${pkg.version}: keeps Droid's custom models current.
+const USAGE = `droid-models ${pkg.version}: use your own model providers in Factory Droid.
 
   droid-models                   open the app
   droid-models status            show providers, keys and models
@@ -84,6 +85,15 @@ function schedule(remove: boolean) {
 
 async function main() {
 	const [command, ...args] = process.argv.slice(2);
+	// These can save the app's path in Droid's settings or the daily sync.
+	if (command === undefined || command === "sync" || command === "schedule") {
+		try {
+			ensureStableCopy();
+		} catch (error) {
+			console.error(`Couldn't copy the app to ${stableCopyPath()}: ${(error as Error).message}`);
+			process.exit(1);
+		}
+	}
 	switch (command) {
 		case undefined: {
 			if (!process.stdin.isTTY || !process.stdout.isTTY) {
