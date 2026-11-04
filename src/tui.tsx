@@ -722,12 +722,12 @@ export function App({ builtin = PROVIDERS, scheduler = launchdScheduler, openUrl
 	const cleanUp = async (chosen: Leftover[]) => {
 		setView({ name: "home" });
 		setBusy("Cleaning up");
-		selectModels(chosen);
+		const newTicks = selectModels(chosen);
 		const providers = loadSnapshot(builtin).providers;
 		if (chosen.some(l => l.kind === "sameProvider")) await runSync({ providers: () => loadSnapshot(builtin).providers });
 		let message: Notice;
 		try {
-			const result = finishCleanup(chosen, providers, readKeys());
+			const result = finishCleanup(chosen, providers, readKeys(), newTicks);
 			const kept = result.kept.length ? ` Kept, because the provider doesn't list it: ${result.kept.join(", ")}.` : "";
 			const backup = result.backup ? ` Backup: ${result.backup.split("/").pop()}.` : "";
 			message = { kind: result.kept.length ? "warn" : "good", text: `Removed ${plural(result.removed.length, "older model")}.${backup}${kept}` };

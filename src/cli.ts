@@ -3,7 +3,7 @@ import pkg from "../package.json";
 import { findLeftovers } from "./cleanup";
 import { readDroidSettings } from "./droid";
 import { FIXER_PORT, serveFixer, startFixerAndGetToken } from "./fixer";
-import { migrateToSelections } from "./migrate";
+import { migrateToSelections, migrationBlocked } from "./migrate";
 import { allProviders, checkCustomProviders } from "./providers";
 import { logPath, launchdScheduler } from "./schedule";
 import { ensureStableCopy, stableCopyPath } from "./self";
@@ -47,7 +47,6 @@ async function sync(dryRun: boolean) {
 }
 
 function status() {
-	migrateToSelections();
 	const settings = readSettings();
 	console.log(`Health check: ${settings.healthCheck ? "on" : "off"}\n`);
 	const keys = readKeys();
@@ -100,7 +99,10 @@ async function main() {
 				console.log(USAGE);
 				return;
 			}
-			migrateToSelections();
+			if (!migrateToSelections()) {
+				console.error(migrationBlocked());
+				process.exit(1);
+			}
 			const { startApp } = await import("./tui");
 			return startApp();
 		}

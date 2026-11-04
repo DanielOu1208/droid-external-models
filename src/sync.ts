@@ -1,8 +1,8 @@
 import { type Entry, fetchJson, type Plan, planProvider } from "./catalog";
 import { isOwnedBy, mergeEntries, readDroidSettings, writeDroidSettings } from "./droid";
 import { getDroidTools } from "./droid-tools";
-import { checkProvider } from "./health";
-import { migrateToSelections } from "./migrate";
+import { checkProvider, type ProbeResult } from "./health";
+import { migrateToSelections, migrationBlocked, previewMigration } from "./migrate";
 import { allProviders, type Provider } from "./providers";
 import { readHealth, readKeys, readSettings, type Settings, tryExclusive, updateState, withLock, writeHealth } from "./store";
 
@@ -45,17 +45,17 @@ interface Spent {
 }
 
 // Returns null if the keys or settings changed along the way, so the work no longer applies.
-async function attemptSync(options: SyncOptions, spent: Spent): Promise<SyncResult | null> {
+async function attemptSync(options: SyncOptions, spent: Spent, probed: Map<string, ProbeResult>): Promise<SyncResult | null> {
 	const dryRun = options.dryRun ?? false;
-	migrateToSelections();
-	const settings = readSettings();
+	const settings = dryRun ? previewMigration() : migrateToSelections() ? readSettings() : null;
+	if (!settings) return { ...emptyResult(migrationBlocked()), ...spent };
 	const runChecks = settings.healthCheck && !dryRun;
 	// Held until the results are in Droid, so another copy can't publish models that are still being checked.
 	const release = runChecks ? tryExclusive("health-check") : null;
 	if (runChecks && !release) return { ...emptyResult("Another copy of droid-models is checking models, so nothing changed this time."), ...spent };
 	try {
 		const keys = readKeys();
-		const startedWith = JSON.stringify([settings, keys]);
+		const startedWith = JSON.stringify([readSettings(), keys]);
 		const isCurrent = () => JSON.stringify([readSettings(), readKeys()]) === startedWith;
 		const providers = typeof options.providers === "function" ? options.providers() : (options.providers ?? allProviders(settings.customProviders));
 		const connected = providers.filter(p => keys[p.id]);
@@ -73,7 +73,7 @@ async function attemptSync(options: SyncOptions, spent: Spent): Promise<SyncResu
 			const tools = await getDroidTools();
 			for (const [i, plan] of plans.entries()) {
 				if (plan.keyRejected) continue;
-				const check = await checkProvider(plan, keys[plan.provider.id] as string, settings, tools, health, isCurrent);
+				const check = await checkProvider(plan, keys[plan.provider.id] as string, settings, tools, health, isCurrent, probed);
 				plans[i] = check.plan;
 				spent.checked += check.checked;
 				spent.requests += check.requests;
@@ -87,9 +87,9 @@ async function attemptSync(options: SyncOptions, spent: Spent): Promise<SyncResu
 			writeHealth(health);
 		}
 
-		// What the user ticked decides what's in Droid. A ticked model missing from a list stays, so a rejected
-		// key or a provider outage can't remove anything, and an outage found by checks leaves that provider alone.
-		const updates = plans.filter(p => !outages.includes(p.provider.label));
+		// What the user ticked decides what's in Droid. A ticked model missing from a list stays, so a rejected key
+		// or a provider outage can't remove anything. An outage found by checks adds nothing, but an unticked model still goes.
+		const updates = plans.map(p => (outages.includes(p.provider.label) ? { provider: p.provider, entries: [], missing: settings.selected[p.provider.id] ?? [] } : p));
 		try {
 			return withLock(() => {
 				if (!isCurrent()) return null;
@@ -129,8 +129,10 @@ let queue: Promise<unknown> = Promise.resolve();
 export function runSync(options: SyncOptions = {}): Promise<SyncResult> {
 	const run = queue.then(async () => {
 		const spent: Spent = { checked: 0, requests: 0 };
+		// A restart reuses these, so it doesn't pay to test the same model again.
+		const probed = new Map<string, ProbeResult>();
 		for (let attempt = 0; attempt < MAX_SYNC_ATTEMPTS; attempt++) {
-			const result = await attemptSync(options, spent);
+			const result = await attemptSync(options, spent, probed);
 			if (result) return result;
 		}
 		return { ...emptyResult("Your keys or settings kept changing, so Droid's models weren't updated. Try again."), ...spent };

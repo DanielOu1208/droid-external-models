@@ -176,15 +176,25 @@ export function removeEntries(settings: Entry, chosen: Leftover[]): Entry {
 	return { ...next, customModels: kept.map((e, i) => ("index" in e ? { ...e, index: i } : e)) };
 }
 
-export function selectModels(chosen: Leftover[]) {
+export interface NewTick {
+	providerId: string;
+	model: string;
+}
+
+// Returns the ticks this added, so a cleanup that can't move a model takes back only those.
+export function selectModels(chosen: Leftover[]): NewTick[] {
+	const added: NewTick[] = [];
 	updateSettings(settings => {
 		const selected = { ...settings.selected };
 		for (const { kind, provider, entry } of chosen) {
-			if (kind !== "sameProvider" || !provider) continue;
-			selected[provider.id] = [...new Set([...(selected[provider.id] ?? []), String(entry.model)])];
+			const model = String(entry.model);
+			if (kind !== "sameProvider" || !provider || selected[provider.id]?.includes(model)) continue;
+			selected[provider.id] = [...(selected[provider.id] ?? []), model];
+			added.push({ providerId: provider.id, model });
 		}
 		return { ...settings, selected };
 	});
+	return added;
 }
 
 export interface CleanupResult {
@@ -194,7 +204,7 @@ export interface CleanupResult {
 }
 
 // Call after pinning and syncing: anything that moved now has a replacement, so nothing is left without one.
-export function finishCleanup(chosen: Leftover[], providers: Provider[], keys: Record<string, string>): CleanupResult {
+export function finishCleanup(chosen: Leftover[], providers: Provider[], keys: Record<string, string>, newTicks: NewTick[] = []): CleanupResult {
 	return withLock(() => {
 		const settings = readDroidSettings();
 		const fresh = findLeftovers(settings, providers, keys);
@@ -203,11 +213,11 @@ export function finishCleanup(chosen: Leftover[], providers: Provider[], keys: R
 		// The user saw any differences and ticked it anyway, so "similar" counts here.
 		const removable = matching.filter(l => l.kind === "duplicate" || l.kind === "similar" || (l.kind === "other" && l.removable));
 		const notMoved = matching.filter(l => !removable.includes(l));
-		// The provider doesn't list these, so ticking them was no use. The hand-made entry stays as it was.
+		// These couldn't move, so ticking them here was no use. The hand-made entry stays as it was, and so does any earlier tick.
 		updateSettings(current => {
 			const selected = { ...current.selected };
 			for (const { provider, entry } of notMoved) {
-				if (provider) selected[provider.id] = (selected[provider.id] ?? []).filter(m => m !== entry.model);
+				if (provider && newTicks.some(t => t.providerId === provider.id && t.model === entry.model)) selected[provider.id] = (selected[provider.id] ?? []).filter(m => m !== entry.model);
 			}
 			return { ...current, selected };
 		});

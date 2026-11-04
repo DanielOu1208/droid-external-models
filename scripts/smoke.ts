@@ -65,3 +65,5 @@ if (app.exitCode !== 0) fail(`the app exited ${app.exitCode}.`);
 
 rmSync(home, { recursive: true, force: true });
 console.log(`Smoke test passed: ${pkg.version} on ${process.platform} ${process.arch}.`);
+// On Linux the closed terminal would otherwise keep this script running.
+process.exit(0);

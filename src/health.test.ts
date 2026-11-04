@@ -327,6 +327,43 @@ describe("syncing", () => {
 		expect(droidModels()).toEqual(["a", "b"]);
 	});
 
+	test("during an outage found by checks, an unticked model still goes and ticked ones stay", async () => {
+		const providers = useMock(true, ["a", "b"]);
+		const inner = handler;
+		handler = (req, body) => (new URL(req.url).pathname === "/chat/completions" ? fail(400, "down") : inner(req, body));
+		seedDroid([owned("a"), owned("b"), owned("c"), { model: "mine", displayName: "Mine" }]);
+		const result = await runSync({ providers });
+		expect(result.outages).toEqual(["Host"]);
+		expect(droidModels().sort()).toEqual(["a", "b", "mine"]);
+	});
+
+	test("an outage doesn't add a newly ticked model", async () => {
+		const providers = useMock(true, ["a", "b", "c"]);
+		const inner = handler;
+		handler = (req, body) => (new URL(req.url).pathname === "/chat/completions" ? fail(400, "down") : inner(req, body));
+		seedDroid([owned("a"), owned("b")]);
+		await runSync({ providers });
+		expect(droidModels().sort()).toEqual(["a", "b"]);
+	});
+
+	test("a restart doesn't pay to test the same models again", async () => {
+		const providers = useMock(true, ["a", "b"]);
+		const inner = handler;
+		let seen = 0;
+		handler = (req, body) => {
+			if (new URL(req.url).pathname !== "/chat/completions") return inner(req, body);
+			// Changing a setting during the last test makes the whole sync start over.
+			if (++seen === 2) updateSettings(s => ({ ...s, reasoningEffort: "low" }));
+			return fail(400, "down");
+		};
+		seedDroid([owned("a"), owned("b")]);
+		const result = await runSync({ providers });
+		expect(result.outages).toEqual(["Host"]);
+		expect(modelRequests()).toHaveLength(2);
+		expect(result.requests).toBe(2);
+		expect(result.checked).toBe(2);
+	});
+
 	test("a rejected key can't remove anything ticked", async () => {
 		const providers = useMock(false);
 		const inner = handler;

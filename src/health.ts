@@ -145,7 +145,7 @@ export interface ProviderCheck {
 	aborted: boolean;
 }
 
-export async function checkProvider(plan: Plan, key: string, settings: Settings, tools: Tool[], health: HealthMap, shouldContinue: () => boolean = () => true): Promise<ProviderCheck> {
+export async function checkProvider(plan: Plan, key: string, settings: Settings, tools: Tool[], health: HealthMap, shouldContinue: () => boolean = () => true, probed = new Map<string, ProbeResult>()): Promise<ProviderCheck> {
 	const { provider } = plan;
 	const now = () => new Date().toISOString();
 	const saved = health[provider.id] ?? {};
@@ -158,7 +158,14 @@ export async function checkProvider(plan: Plan, key: string, settings: Settings,
 	// Everything ticked is a candidate, including failing models, so they get their chance to recover.
 	const candidates = buildPlan(plan, settings, undefined).selected;
 	const due = candidates.filter(m => isDue(working[m.id]));
-	const results = await mapLimit(due, CONCURRENT_CHECKS, m => probeModel(provider, m, key, tools, shouldContinue));
+	const results = await mapLimit(due, CONCURRENT_CHECKS, async m => {
+		const id = JSON.stringify([provider.id, key, m]);
+		const earlier = probed.get(id);
+		if (earlier) return { ...earlier, requests: 0 };
+		const result = await probeModel(provider, m, key, tools, shouldContinue);
+		if (result.outcome !== "cancelled") probed.set(id, result);
+		return result;
+	});
 	due.forEach((m, i) => {
 		const result = results[i] as ProbeResult;
 		requests += result.requests;
@@ -166,7 +173,7 @@ export async function checkProvider(plan: Plan, key: string, settings: Settings,
 			aborted = true;
 			return;
 		}
-		checked++;
+		if (result.requests > 0) checked++;
 		if (result.outcome === "ok") {
 			passed++;
 			working[m.id] = { status: "ok", checkedAt: now(), ...(result.noImage ? { noImage: true } : {}) };
