@@ -1,0 +1,3 @@
+[test]
+# A busy machine shouldn't fail tests that wait on real rendering.
+timeout = 20000
