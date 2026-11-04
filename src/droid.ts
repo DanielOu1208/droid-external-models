@@ -37,6 +37,12 @@ export function isOwnedBy(entry: Entry, provider: Provider): boolean {
 }
 
 export function mergeEntries(existing: Entry[], updates: { provider: Provider; entries: Entry[]; missing?: string[] }[]): Entry[] {
-	const isReplaced = (e: Entry) => updates.some(({ provider, missing }) => isOwnedBy(e, provider) && !missing?.includes(e.model));
-	return [...existing.filter(e => !isReplaced(e)), ...updates.flatMap(u => u.entries)];
+	const kept: Entry[] = [];
+	for (const entry of existing) {
+		const update = updates.find(({ provider }) => isOwnedBy(entry, provider));
+		if (!update) kept.push(entry);
+		// A model kept as it is still needs the app's current path, in case the app has moved.
+		else if (update.missing?.includes(entry.model)) kept.push({ ...entry, apiKeyHelper: helperCommand(update.provider.id, String(entry.apiKeyHelper).endsWith(" --start-fixer")) });
+	}
+	return [...kept, ...updates.flatMap(u => u.entries)];
 }

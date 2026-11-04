@@ -2,9 +2,12 @@
 // Runs the prebuilt app that npm installed for this computer.
 const { spawnSync } = require("node:child_process");
 
+const name = `droid-external-models-${process.platform}-${process.arch}`;
 let binary;
 try {
-	binary = require.resolve(`droid-external-models-${process.platform}-${process.arch}/bin/droid-models`);
+	// Node also searches parent folders, which could hold another release.
+	if (require(`${name}/package.json`).version !== require("../package.json").version) throw new Error("wrong version");
+	binary = require.resolve(`${name}/bin/droid-models`);
 } catch {
 	console.error(`droid-models has no build installed for ${process.platform} ${process.arch}. It runs on macOS and on Linux with glibc, on Intel or ARM. If that's this computer, reinstall without skipping optional dependencies.`);
 	process.exit(1);

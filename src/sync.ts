@@ -47,7 +47,9 @@ interface Spent {
 // Returns null if the keys or settings changed along the way, so the work no longer applies.
 async function attemptSync(options: SyncOptions, spent: Spent, probed: Map<string, ProbeResult>): Promise<SyncResult | null> {
 	const dryRun = options.dryRun ?? false;
-	const settings = dryRun ? previewMigration() : migrateToSelections() ? readSettings() : null;
+	if (!dryRun && !migrateToSelections()) return { ...emptyResult(migrationBlocked()), ...spent };
+	const stored = readSettings();
+	const settings = dryRun ? previewMigration() : stored;
 	if (!settings) return { ...emptyResult(migrationBlocked()), ...spent };
 	const runChecks = settings.healthCheck && !dryRun;
 	// Held until the results are in Droid, so another copy can't publish models that are still being checked.
@@ -55,7 +57,7 @@ async function attemptSync(options: SyncOptions, spent: Spent, probed: Map<strin
 	if (runChecks && !release) return { ...emptyResult("Another copy of droid-models is checking models, so nothing changed this time."), ...spent };
 	try {
 		const keys = readKeys();
-		const startedWith = JSON.stringify([readSettings(), keys]);
+		const startedWith = JSON.stringify([stored, keys]);
 		const isCurrent = () => JSON.stringify([readSettings(), readKeys()]) === startedWith;
 		const providers = typeof options.providers === "function" ? options.providers() : (options.providers ?? allProviders(settings.customProviders));
 		const connected = providers.filter(p => keys[p.id]);

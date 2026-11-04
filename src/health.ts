@@ -163,7 +163,9 @@ export async function checkProvider(plan: Plan, key: string, settings: Settings,
 		const earlier = probed.get(id);
 		if (earlier) return { ...earlier, requests: 0 };
 		const result = await probeModel(provider, m, key, tools, shouldContinue);
+		// A model cancelled partway has had its requests for this sync, so it's left for the next one.
 		if (result.outcome !== "cancelled") probed.set(id, result);
+		else if (result.requests > 0) probed.set(id, { outcome: "unknown", requests: result.requests });
 		return result;
 	});
 	due.forEach((m, i) => {

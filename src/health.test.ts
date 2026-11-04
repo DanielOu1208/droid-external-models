@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { buildPlan, describeModel, planProvider, type Model, type Plan } from ".
 import { checkProvider, isDue, probeModel } from "./health";
 import type { Provider } from "./providers";
 import { DEFAULT_SETTINGS, getKey, type HealthMap, readHealth, readSettings, removeKey, saveKey, type Settings, tryExclusive, updateSettings, writeSettings } from "./store";
+import * as store from "./store";
 import { runSync } from "./sync";
 
 type Handler = (req: Request, body: any) => Response | Promise<Response>;
@@ -362,6 +363,36 @@ describe("syncing", () => {
 		expect(modelRequests()).toHaveLength(2);
 		expect(result.requests).toBe(2);
 		expect(result.checked).toBe(2);
+	});
+
+	test("a model cancelled partway isn't charged for again", async () => {
+		const providers = useMock(true, ["a"]);
+		const inner = handler;
+		let seen = 0;
+		handler = (req, body) => {
+			if (new URL(req.url).pathname !== "/chat/completions") return inner(req, body);
+			seen++;
+			// The first request fails in a way that gets a retry, and the setting changes before it runs.
+			updateSettings(s => ({ ...s, reasoningEffort: seen % 2 ? "low" : "medium" }));
+			return fail(503, "busy");
+		};
+		seedDroid([owned("a")]);
+		const result = await runSync({ providers });
+		expect(modelRequests()).toHaveLength(1);
+		expect(result.requests).toBe(1);
+		expect(droidModels()).toEqual(["a"]);
+	});
+
+	test("a setting changed just before checks start can't be overruled by the older plan", async () => {
+		const providers = useMock(false, ["a", "b"]);
+		const realReadKeys = store.readKeys;
+		const spy = spyOn(store, "readKeys").mockImplementationOnce(() => {
+			updateSettings(s => ({ ...s, selected: { host: ["b"] } }));
+			return realReadKeys();
+		});
+		await runSync({ providers });
+		spy.mockRestore();
+		expect(droidModels()).toEqual(["b"]);
 	});
 
 	test("a rejected key can't remove anything ticked", async () => {

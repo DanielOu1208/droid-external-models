@@ -376,6 +376,15 @@ describe("older models already in Droid", () => {
 });
 
 describe("merging into Droid's settings", () => {
+	test("a model kept because it's no longer listed gets the app's current path", () => {
+		const moved = { model: "gone", displayName: "Gone [Router]", apiKeyHelper: "/deleted/droid-models key router", maxOutputTokens: 5 };
+		const fixed = { ...moved, model: "gone2", apiKeyHelper: "/deleted/droid-models key router --start-fixer" };
+		expect(mergeEntries([moved, fixed], [{ provider: generic, entries: [], missing: ["gone", "gone2"] }])).toEqual([
+			{ ...moved, apiKeyHelper: helperCommand("router") },
+			{ ...fixed, apiKeyHelper: helperCommand("router", true) },
+		]);
+	});
+
 	const mine = { model: "old", displayName: "Old [Router]", apiKeyHelper: "/x/droid-models key router" };
 	const legacy = { model: "older", displayName: "Older [Router]", apiKeyHelper: "/x/.bun/bin/omp token router" };
 	const fresh = { model: "new", displayName: "New [Router]", apiKeyHelper: "/x/droid-models key router" };
@@ -387,7 +396,7 @@ describe("merging into Droid's settings", () => {
 	});
 
 	test("a ticked model the provider stopped listing keeps its entry", () => {
-		expect(mergeEntries([mine], [{ provider: generic, entries: [fresh], missing: ["old"] }])).toEqual([mine, fresh]);
+		expect(mergeEntries([mine], [{ provider: generic, entries: [fresh], missing: ["old"] }])).toEqual([{ ...mine, apiKeyHelper: helperCommand("router") }, fresh]);
 	});
 
 	test("leaves everything alone when a provider isn't updated", () => {
